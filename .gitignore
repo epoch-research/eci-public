@@ -1,5 +1,9 @@
 # Outputs
 outputs/
+.cache/
+
+# Claude
+.claude/
 
 # Python
 __pycache__/
