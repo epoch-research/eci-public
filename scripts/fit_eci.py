@@ -6,6 +6,7 @@ Usage:
     python scripts/fit_eci.py
     python scripts/fit_eci.py --input path/to/benchmarks.csv
     python scripts/fit_eci.py --bootstrap-samples 200
+    python scripts/fit_eci.py --numeric-jacobian
 """
 
 import argparse
@@ -37,6 +38,11 @@ def main():
         default=OUTPUT_DIR,
         help=f"Output directory for scores (default: {OUTPUT_DIR})",
     )
+    parser.add_argument(
+        "--numeric-jacobian",
+        action="store_true",
+        help="Use numerical Jacobian instead of analytical (slower, matches website exactly)",
+    )
     args = parser.parse_args()
 
     print(f"Loading benchmark data from {args.input}...")
@@ -44,11 +50,13 @@ def main():
     print(f"  Loaded {len(df)} performance records")
     print(f"  {df['model_id'].nunique()} models, {df['benchmark_id'].nunique()} benchmarks")
 
-    print(f"\nFitting IRT model with {args.bootstrap_samples} bootstrap samples...")
+    jacobian_type = "numerical" if args.numeric_jacobian else "analytical"
+    print(f"\nFitting IRT model ({jacobian_type} Jacobian, {args.bootstrap_samples} bootstrap samples)...")
     model_df, bench_df = fit_eci_model(
         df,
         bootstrap_samples=args.bootstrap_samples,
         bootstrap_seed=12345,
+        use_analytical_jacobian=not args.numeric_jacobian,
     )
 
     print("Computing ECI/EDI scores...")

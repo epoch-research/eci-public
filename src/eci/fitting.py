@@ -17,6 +17,7 @@ where:
 import numpy as np
 import pandas as pd
 from scipy.optimize import least_squares
+from scipy.sparse import lil_matrix
 from tqdm import tqdm
 
 
@@ -61,6 +62,7 @@ def fit_eci_model(
     bootstrap_samples: int = 100,
     bootstrap_seed: int = 12345,
     ci_level: float = 0.90,
+    use_analytical_jacobian: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Fit the IRT model to estimate model capabilities and benchmark difficulties.
@@ -81,6 +83,9 @@ def fit_eci_model(
         bootstrap_samples: Number of bootstrap resamples for confidence intervals.
         bootstrap_seed: Random seed for reproducibility.
         ci_level: Confidence interval level (e.g., 0.90 for 90% CI).
+        use_analytical_jacobian: If True, use analytical Jacobian for faster optimization.
+            If False, use numerical differentiation (slower but may give slightly
+            different results due to optimizer path differences).
 
     Returns:
         Tuple of (model_capabilities_df, benchmark_params_df):
@@ -141,6 +146,9 @@ def fit_eci_model(
         discriminability = np.insert(discrim_free, anchor_idx, anchor_discriminability)
         return capability, difficulty, discriminability
 
+    n_params = n_models + n_benchmarks + (n_benchmarks - 1)
+    n_obs = len(performance)
+
     def residuals(params: np.ndarray) -> np.ndarray:
         capability, difficulty, discriminability = unpack_params(params)
         pred = sigmoid(discriminability[bench_idx] * (capability[model_idx] - difficulty[bench_idx]))
@@ -148,7 +156,6 @@ def fit_eci_model(
 
         # L2 regularization
         if regularization_strength > 0:
-            n_params = n_models + n_benchmarks + (n_benchmarks - 1)
             reg_penalty = regularization_strength * (
                 np.sum(capability**2) +
                 np.sum(difficulty**2) +
@@ -157,6 +164,67 @@ def fit_eci_model(
             resid = np.append(resid, np.sqrt(reg_penalty))
 
         return resid
+
+    def jacobian(params: np.ndarray) -> np.ndarray:
+        """Analytical Jacobian for faster optimization."""
+        capability, difficulty, discriminability = unpack_params(params)
+
+        # Compute predictions and sigmoid derivative
+        z = discriminability[bench_idx] * (capability[model_idx] - difficulty[bench_idx])
+        s = sigmoid(z)
+        ds = s * (1 - s)  # sigmoid'(z)
+
+        # Number of rows: n_obs + 1 (for regularization)
+        n_rows = n_obs + 1 if regularization_strength > 0 else n_obs
+        jac = lil_matrix((n_rows, n_params))
+
+        # Derivatives w.r.t. capability
+        # d(resid_i)/d(cap_m) = ds[i] * discrim[b] for obs where model_idx[i] == m
+        cap_derivs = ds * discriminability[bench_idx]
+        for i in range(n_obs):
+            jac[i, model_idx[i]] = cap_derivs[i]
+
+        # Derivatives w.r.t. difficulty
+        # d(resid_i)/d(diff_b) = -ds[i] * discrim[b] for obs where bench_idx[i] == b
+        diff_derivs = -ds * discriminability[bench_idx]
+        for i in range(n_obs):
+            jac[i, n_models + bench_idx[i]] = diff_derivs[i]
+
+        # Derivatives w.r.t. discriminability (free parameters only)
+        # d(resid_i)/d(discrim_b) = ds[i] * (cap[m] - diff[b])
+        discrim_derivs = ds * (capability[model_idx] - difficulty[bench_idx])
+        for i in range(n_obs):
+            b = bench_idx[i]
+            if b == anchor_idx:
+                continue  # anchor discriminability is fixed
+            # Map benchmark index to parameter index
+            param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
+            jac[i, param_idx] = discrim_derivs[i]
+
+        # Regularization term derivatives
+        if regularization_strength > 0:
+            reg_penalty = regularization_strength * (
+                np.sum(capability**2) +
+                np.sum(difficulty**2) +
+                np.sum(discriminability[discriminability != anchor_discriminability]**2)
+            ) / n_params
+
+            if reg_penalty > 0:
+                scale = regularization_strength / (n_params * np.sqrt(reg_penalty))
+                # d/d(cap_m) of sqrt(reg) = scale * cap_m
+                for m in range(n_models):
+                    jac[n_obs, m] = scale * capability[m]
+                # d/d(diff_b) of sqrt(reg) = scale * diff_b
+                for b in range(n_benchmarks):
+                    jac[n_obs, n_models + b] = scale * difficulty[b]
+                # d/d(discrim_b) of sqrt(reg) = scale * discrim_b (free only)
+                for b in range(n_benchmarks):
+                    if b == anchor_idx:
+                        continue
+                    param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
+                    jac[n_obs, param_idx] = scale * discriminability[b]
+
+        return jac.tocsr()
 
     # Initial values
     np.random.seed(42)
@@ -181,6 +249,7 @@ def fit_eci_model(
     result = least_squares(
         residuals,
         init_params,
+        jac=jacobian if use_analytical_jacobian else "2-point",
         bounds=(lower, upper),
         method="trf",
         verbose=0
@@ -216,13 +285,13 @@ def fit_eci_model(
             boot_performance = performance[idx]
             boot_model_idx = model_idx[idx]
             boot_bench_idx = bench_idx[idx]
+            boot_n_obs = len(boot_performance)
 
             def boot_residuals(params):
                 cap, diff, disc = unpack_params(params)
                 pred = sigmoid(disc[boot_bench_idx] * (cap[boot_model_idx] - diff[boot_bench_idx]))
                 resid = pred - boot_performance
                 if regularization_strength > 0:
-                    n_params = n_models + n_benchmarks + (n_benchmarks - 1)
                     reg = regularization_strength * (
                         np.sum(cap**2) + np.sum(diff**2) +
                         np.sum(disc[disc != anchor_discriminability]**2)
@@ -230,10 +299,49 @@ def fit_eci_model(
                     resid = np.append(resid, np.sqrt(reg))
                 return resid
 
+            def boot_jacobian(params):
+                cap, diff, disc = unpack_params(params)
+                z = disc[boot_bench_idx] * (cap[boot_model_idx] - diff[boot_bench_idx])
+                s = sigmoid(z)
+                ds = s * (1 - s)
+
+                n_rows = boot_n_obs + 1 if regularization_strength > 0 else boot_n_obs
+                jac = lil_matrix((n_rows, n_params))
+
+                cap_derivs = ds * disc[boot_bench_idx]
+                diff_derivs = -ds * disc[boot_bench_idx]
+                discrim_derivs = ds * (cap[boot_model_idx] - diff[boot_bench_idx])
+
+                for i in range(boot_n_obs):
+                    jac[i, boot_model_idx[i]] = cap_derivs[i]
+                    jac[i, n_models + boot_bench_idx[i]] = diff_derivs[i]
+                    b = boot_bench_idx[i]
+                    if b != anchor_idx:
+                        param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
+                        jac[i, param_idx] = discrim_derivs[i]
+
+                if regularization_strength > 0:
+                    reg = regularization_strength * (
+                        np.sum(cap**2) + np.sum(diff**2) +
+                        np.sum(disc[disc != anchor_discriminability]**2)
+                    ) / n_params
+                    if reg > 0:
+                        scale = regularization_strength / (n_params * np.sqrt(reg))
+                        for m in range(n_models):
+                            jac[boot_n_obs, m] = scale * cap[m]
+                        for b in range(n_benchmarks):
+                            jac[boot_n_obs, n_models + b] = scale * diff[b]
+                            if b != anchor_idx:
+                                param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
+                                jac[boot_n_obs, param_idx] = scale * disc[b]
+
+                return jac.tocsr()
+
             try:
                 boot_result = least_squares(
                     boot_residuals,
                     result.x.copy(),
+                    jac=boot_jacobian if use_analytical_jacobian else "2-point",
                     bounds=(lower, upper),
                     method="trf",
                     verbose=0

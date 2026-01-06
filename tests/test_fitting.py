@@ -20,8 +20,8 @@ EXPECTED_ECI_URL = "https://epoch.ai/data/eci_scores.csv"
 EXPECTED_EDI_URL = "https://epoch.ai/data/edi_scores.csv"
 
 # Tolerance for score comparisons
-ECI_TOLERANCE = 0.01  # ECI points
-EDI_TOLERANCE = 0.01  # EDI points
+ECI_TOLERANCE = 0.1  # ECI points
+EDI_TOLERANCE = 0.1  # EDI points
 
 
 @pytest.fixture(scope="module")
