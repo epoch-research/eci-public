@@ -105,6 +105,8 @@ RANDOM_BASELINES = {
 # Benchmark metadata
 BENCHMARK_METADATA = {
     "ARC AI2": {"release_date": "2018-03-14", "is_math": False, "is_coding": False},
+    "Chess Puzzles": {"release_date": "2025-01-01", "is_math": False, "is_coding": False},
+    "SimpleQA Verified": {"release_date": "2024-10-30", "is_math": False, "is_coding": False},
     "BBH": {"release_date": "2022-10-17", "is_math": False, "is_coding": False},
     "GSM8K": {"release_date": "2021-10-27", "is_math": True, "is_coding": False},
     "HellaSwag": {"release_date": "2019-05-19", "is_math": False, "is_coding": False},
@@ -141,6 +143,18 @@ BENCHMARK_METADATA = {
     "VPCT": {"release_date": "2025-04-30", "is_math": False, "is_coding": False},
     "DeepResearch Bench": {"release_date": "2025-04-08", "is_math": False, "is_coding": False},
 }
+
+
+def get_all_benchmark_names() -> set[str]:
+    """
+    Get the names of all available benchmarks.
+
+    Returns:
+        Set of benchmark names from both internal and external sources.
+    """
+    internal_names = set(INTERNAL_BENCHMARKS.values())
+    external_names = {spec["name"] for spec in EXTERNAL_BENCHMARKS.values()}
+    return internal_names | external_names
 
 
 def download_benchmark_data(url: str = BENCHMARK_DATA_URL, cache_dir: Optional[Path] = None) -> dict[str, pd.DataFrame]:
@@ -289,6 +303,8 @@ def prepare_benchmark_data(
     cache_dir: Optional[Path] = None,
     min_benchmarks_per_model: int = 4,
     min_date: str = "2023-01-01",
+    include_benchmarks: Optional[set[str]] = None,
+    exclude_benchmarks: Optional[set[str]] = None,
 ) -> pd.DataFrame:
     """
     Load and process benchmark data for ECI fitting.
@@ -305,10 +321,43 @@ def prepare_benchmark_data(
         cache_dir: Optional directory to cache downloaded files
         min_benchmarks_per_model: Minimum benchmarks required per model
         min_date: Minimum model release date to include
+        include_benchmarks: If provided, only include these benchmarks (by name).
+            Use get_all_benchmark_names() to see available options.
+        exclude_benchmarks: If provided, exclude these benchmarks (by name).
+            Cannot be used together with include_benchmarks.
 
     Returns:
         DataFrame matching the format of eci_benchmarks.csv
+
+    Raises:
+        ValueError: If both include_benchmarks and exclude_benchmarks are specified,
+            or if any specified benchmark names are not recognized.
     """
+    # Validate benchmark filtering parameters
+    if include_benchmarks is not None and exclude_benchmarks is not None:
+        raise ValueError(
+            "Cannot specify both include_benchmarks and exclude_benchmarks. "
+            "Use one or the other."
+        )
+
+    all_benchmarks = get_all_benchmark_names()
+
+    if include_benchmarks is not None:
+        unknown = include_benchmarks - all_benchmarks
+        if unknown:
+            raise ValueError(
+                f"Unknown benchmark names in include_benchmarks: {sorted(unknown)}. "
+                f"Use get_all_benchmark_names() to see available options."
+            )
+
+    if exclude_benchmarks is not None:
+        unknown = exclude_benchmarks - all_benchmarks
+        if unknown:
+            raise ValueError(
+                f"Unknown benchmark names in exclude_benchmarks: {sorted(unknown)}. "
+                f"Use get_all_benchmark_names() to see available options."
+            )
+
     # Download data
     dfs = download_benchmark_data(url, cache_dir)
 
@@ -319,6 +368,12 @@ def prepare_benchmark_data(
     internal = load_internal_benchmarks(dfs)
     external = load_external_benchmarks(dfs)
     scores = pd.concat([internal, external], ignore_index=True)
+
+    # Apply benchmark filtering
+    if include_benchmarks is not None:
+        scores = scores[scores["benchmark"].isin(include_benchmarks)]
+    elif exclude_benchmarks is not None:
+        scores = scores[~scores["benchmark"].isin(exclude_benchmarks)]
 
     # Apply random baseline correction
     scores = apply_random_baseline_correction(scores)

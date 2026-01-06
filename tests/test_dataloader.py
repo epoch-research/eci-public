@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from pathlib import Path
 
-from eci.dataloader import prepare_benchmark_data
+from eci.dataloader import prepare_benchmark_data, get_all_benchmark_names
 
 EXPECTED_URL = "https://epoch.ai/data/eci_benchmarks.csv"
 
@@ -178,6 +178,77 @@ class TestDataLoaderAccuracy:
         # Allow some tolerance
         ratio = loaded_count / expected_count if expected_count > 0 else 0
         assert 0.8 < ratio < 1.2, f"Row count ratio {ratio:.2f} outside acceptable range"
+
+
+class TestBenchmarkFiltering:
+    """Test benchmark filtering functionality."""
+
+    def test_get_all_benchmark_names(self):
+        """Test that get_all_benchmark_names returns expected benchmarks."""
+        names = get_all_benchmark_names()
+        assert isinstance(names, set)
+        assert len(names) > 0
+        # Check some expected benchmarks exist
+        assert "MMLU" in names
+        assert "Winogrande" in names
+        assert "GPQA diamond" in names
+
+    def test_include_benchmarks(self):
+        """Test including only specific benchmarks."""
+        include = {"MMLU", "Winogrande", "GSM8K", "GPQA diamond", "HellaSwag"}
+        filtered = prepare_benchmark_data(
+            cache_dir=Path(".cache"),
+            include_benchmarks=include,
+            min_benchmarks_per_model=4,  # Allow models with at least 4 of the 5 benchmarks
+        )
+
+        benchmarks_in_result = set(filtered["benchmark"].unique())
+        # All returned benchmarks should be from our include set
+        assert benchmarks_in_result.issubset(include), (
+            f"Unexpected benchmarks: {benchmarks_in_result - include}"
+        )
+        # Should have at least some of the requested benchmarks
+        assert len(benchmarks_in_result) > 0, "No benchmarks returned"
+
+    def test_exclude_benchmarks(self):
+        """Test excluding specific benchmarks."""
+        exclude = {"MMLU", "Winogrande"}
+        filtered = prepare_benchmark_data(
+            cache_dir=Path(".cache"),
+            exclude_benchmarks=exclude,
+        )
+
+        benchmarks_in_result = set(filtered["benchmark"].unique())
+        assert not (benchmarks_in_result & exclude), (
+            f"Excluded benchmarks found in result: {benchmarks_in_result & exclude}"
+        )
+        # Should still have other benchmarks
+        assert len(benchmarks_in_result) > 0
+
+    def test_cannot_use_both_include_and_exclude(self):
+        """Test that using both include and exclude raises error."""
+        with pytest.raises(ValueError, match="Cannot specify both"):
+            prepare_benchmark_data(
+                cache_dir=Path(".cache"),
+                include_benchmarks={"MMLU"},
+                exclude_benchmarks={"Winogrande"},
+            )
+
+    def test_unknown_benchmark_in_include_raises_error(self):
+        """Test that unknown benchmark names in include_benchmarks raises error."""
+        with pytest.raises(ValueError, match="Unknown benchmark names"):
+            prepare_benchmark_data(
+                cache_dir=Path(".cache"),
+                include_benchmarks={"MMLU", "NonexistentBenchmark"},
+            )
+
+    def test_unknown_benchmark_in_exclude_raises_error(self):
+        """Test that unknown benchmark names in exclude_benchmarks raises error."""
+        with pytest.raises(ValueError, match="Unknown benchmark names"):
+            prepare_benchmark_data(
+                cache_dir=Path(".cache"),
+                exclude_benchmarks={"NonexistentBenchmark"},
+            )
 
 
 if __name__ == "__main__":
