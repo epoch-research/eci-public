@@ -6,7 +6,7 @@ This package fits the ECI model to compute:
 
 For details on the methodology, see:
 - **Paper**: [A Rosetta Stone for AI Benchmarks](https://arxiv.org/abs/2512.00193)
-- **Website**: [epoch.ai/benchmarks/eci](https://epoch.ai/benchmarks/eci)
+- **Website**: [Epoch Capabilities Index](https://epoch.ai/benchmarks/eci)
 
 ## Installation
 
