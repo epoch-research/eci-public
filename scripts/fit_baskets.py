@@ -48,7 +48,7 @@ BASKETS = {
             "SimpleQA Verified",
             "ScienceQA",
         },
-        "anchor_benchmark": "MMLU",
+        "anchor_benchmark": "GPQA diamond",
     },
     "math": {
         "name": "Math-ECI",
@@ -59,7 +59,7 @@ BASKETS = {
             "OTIS Mock AIME 2024-2025",
             "GSM8K",
         },
-        "anchor_benchmark": "GSM8K",
+        "anchor_benchmark": "MATH level 5",
     },
 }
 
@@ -70,6 +70,7 @@ def fit_basket(
     min_benchmarks_per_model: int = 3,
     output_dir: Path = OUTPUT_DIR,
     use_analytical_jacobian: bool = True,
+    raw: bool = False,
 ) -> tuple:
     """
     Fit ECI model for a specific benchmark basket.
@@ -80,6 +81,7 @@ def fit_basket(
         min_benchmarks_per_model: Minimum benchmarks required per model
         output_dir: Directory to save output files
         use_analytical_jacobian: Use analytical Jacobian for faster optimization
+        raw: If True, output raw capability/difficulty scores without ECI scaling
 
     Returns:
         Tuple of (eci_df, edi_df) DataFrames
@@ -130,22 +132,30 @@ def fit_basket(
         use_analytical_jacobian=use_analytical_jacobian,
     )
 
-    # Compute ECI scores
-    # Note: This may fail if anchor models aren't in the data
-    print("Computing ECI/EDI scores...")
-    try:
-        eci_df, edi_df = compute_eci_scores(model_df, bench_df)
-    except ValueError as e:
-        print(f"  WARNING: Could not compute scaled ECI scores: {e}")
-        print("  Returning raw capability scores instead")
-        eci_df = model_df.copy()
-        eci_df["eci"] = eci_df["capability"]
-        if "capability_ci_low" in eci_df.columns:
-            eci_df["eci_ci_low"] = eci_df["capability_ci_low"]
-            eci_df["eci_ci_high"] = eci_df["capability_ci_high"]
-        edi_df = bench_df.copy()
-        edi_df["edi"] = edi_df["difficulty"]
-        edi_df["discriminability_scaled"] = edi_df["discriminability"]
+    # Compute ECI scores (or use raw scores)
+    def use_raw_scores():
+        """Convert raw capability/difficulty to output format."""
+        eci = model_df.copy()
+        eci["eci"] = eci["capability"]
+        if "capability_ci_low" in eci.columns:
+            eci["eci_ci_low"] = eci["capability_ci_low"]
+            eci["eci_ci_high"] = eci["capability_ci_high"]
+        edi = bench_df.copy()
+        edi["edi"] = edi["difficulty"]
+        edi["discriminability_scaled"] = edi["discriminability"]
+        return eci, edi
+
+    if raw:
+        print("Using raw capability/difficulty scores (--raw flag)")
+        eci_df, edi_df = use_raw_scores()
+    else:
+        print("Computing ECI/EDI scores...")
+        try:
+            eci_df, edi_df = compute_eci_scores(model_df, bench_df)
+        except ValueError as e:
+            print(f"  WARNING: Could not compute scaled ECI scores: {e}")
+            print("  Returning raw capability scores instead (use --raw to suppress this warning)")
+            eci_df, edi_df = use_raw_scores()
 
     # Save outputs
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -212,6 +222,11 @@ Available baskets:
         action="store_true",
         help="Use numerical Jacobian instead of analytical (slower)",
     )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Output raw capability/difficulty scores without ECI scaling",
+    )
     args = parser.parse_args()
 
     for basket_key in args.baskets:
@@ -221,6 +236,7 @@ Available baskets:
             min_benchmarks_per_model=args.min_benchmarks,
             output_dir=args.output_dir,
             use_analytical_jacobian=not args.numeric_jacobian,
+            raw=args.raw,
         )
 
     print("\n" + "="*60)
