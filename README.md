@@ -5,7 +5,7 @@ This package fits the ECI model to compute:
 - **EDI scores**: Difficulty scores for benchmarks
 
 For details on the methodology, see:
-- **Paper**: [Artificial Capable Intelligence](https://arxiv.org/abs/2512.00193)
+- **Paper**: [A Rosetta Stone for AI Benchmarks](https://arxiv.org/abs/2512.00193)
 - **Website**: [epoch.ai/benchmarks/eci](https://epoch.ai/benchmarks/eci)
 
 ## Installation
