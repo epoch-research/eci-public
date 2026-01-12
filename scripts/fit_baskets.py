@@ -7,17 +7,33 @@ This script fits separate ECI models for domain-specific benchmark subsets:
 - Knowledge-ECI: Knowledge and reasoning benchmarks
 - Math-ECI: Mathematics benchmarks
 
+Two fitting modes are available:
+
+1. Projection mode (default):
+   - First fits a full model on ALL available benchmarks
+   - Then for each basket, freezes the benchmark parameters (difficulty, slope)
+   - Fits only model capabilities to best explain basket performance scores
+   - This approach uses more data to estimate benchmark characteristics
+
+2. Refit mode (--refit flag):
+   - Fits each basket from scratch independently
+   - Estimates both model capabilities AND benchmark parameters per basket
+   - Uses only the benchmarks in that basket for fitting
+
 Usage:
-    python scripts/fit_baskets.py
-    python scripts/fit_baskets.py --baskets swe knowledge
+    python scripts/fit_baskets.py                    # projection mode (default)
+    python scripts/fit_baskets.py --refit            # refit mode
+    python scripts/fit_baskets.py --baskets swe math
     python scripts/fit_baskets.py --bootstrap-samples 200
 """
 
 import argparse
 from pathlib import Path
 
+import pandas as pd
+
 from eci.dataloader import prepare_benchmark_data
-from eci.fitting import fit_eci_model, compute_eci_scores
+from eci.fitting import fit_eci_model, compute_eci_scores, fit_capabilities_given_benchmarks
 
 
 OUTPUT_DIR = Path(__file__).parent.parent / "outputs"
@@ -64,6 +80,52 @@ BASKETS = {
 }
 
 
+def fit_full_model(
+    bootstrap_samples: int = 100,
+    min_benchmarks_per_model: int = 3,
+    use_analytical_jacobian: bool = True,
+) -> tuple:
+    """
+    Fit ECI model on ALL available benchmarks.
+
+    Args:
+        bootstrap_samples: Number of bootstrap samples for confidence intervals
+        min_benchmarks_per_model: Minimum benchmarks required per model
+        use_analytical_jacobian: Use analytical Jacobian for faster optimization
+
+    Returns:
+        Tuple of (model_df, bench_df, full_df) - model capabilities, benchmark params, and raw data
+    """
+    print(f"\n{'='*60}")
+    print("Fitting full ECI model on all benchmarks")
+    print(f"{'='*60}")
+
+    # Load ALL benchmark data (no filtering)
+    print(f"\nLoading all benchmark data...")
+    df = prepare_benchmark_data(
+        cache_dir=Path(".cache"),
+        min_benchmarks_per_model=min_benchmarks_per_model,
+    )
+
+    print(f"  Loaded {len(df)} performance records")
+    print(f"  {df['model_id'].nunique()} models, {df['benchmark_id'].nunique()} benchmarks")
+
+    # Fit the full model
+    jacobian_type = "analytical" if use_analytical_jacobian else "numerical"
+    print(f"\nFitting IRT model ({jacobian_type} Jacobian, {bootstrap_samples} bootstrap samples)...")
+
+    model_df, bench_df = fit_eci_model(
+        df,
+        bootstrap_samples=bootstrap_samples,
+        bootstrap_seed=12345,
+        use_analytical_jacobian=use_analytical_jacobian,
+    )
+
+    print(f"  Fitted {len(model_df)} models and {len(bench_df)} benchmarks")
+
+    return model_df, bench_df, df
+
+
 def fit_basket(
     basket_key: str,
     bootstrap_samples: int = 100,
@@ -71,6 +133,8 @@ def fit_basket(
     output_dir: Path = OUTPUT_DIR,
     use_analytical_jacobian: bool = True,
     raw: bool = False,
+    full_bench_df: pd.DataFrame | None = None,
+    full_data_df: pd.DataFrame | None = None,
 ) -> tuple:
     """
     Fit ECI model for a specific benchmark basket.
@@ -82,6 +146,10 @@ def fit_basket(
         output_dir: Directory to save output files
         use_analytical_jacobian: Use analytical Jacobian for faster optimization
         raw: If True, output raw capability/difficulty scores without ECI scaling
+        full_bench_df: If provided, use these benchmark parameters (from a full model fit)
+            and only fit model capabilities. This is the "projection" approach.
+        full_data_df: If provided along with full_bench_df, use this data (filtered to
+            basket benchmarks) instead of reloading.
 
     Returns:
         Tuple of (eci_df, edi_df) DataFrames
@@ -91,27 +159,47 @@ def fit_basket(
     benchmarks = basket["benchmarks"]
     anchor_benchmark = basket["anchor_benchmark"]
 
+    # Determine mode
+    projection_mode = full_bench_df is not None
+
     print(f"\n{'='*60}")
-    print(f"Fitting {basket_name}")
+    print(f"Fitting {basket_name}" + (" (projection mode)" if projection_mode else " (refit mode)"))
     print(f"{'='*60}")
     print(f"Benchmarks ({len(benchmarks)}):")
     for b in sorted(benchmarks):
         marker = " (anchor)" if b == anchor_benchmark else ""
         print(f"  - {b}{marker}")
 
-    # Load data for this basket
-    print(f"\nLoading benchmark data...")
-    df = prepare_benchmark_data(
-        cache_dir=Path(".cache"),
-        include_benchmarks=benchmarks,
-        min_benchmarks_per_model=min_benchmarks_per_model,
-    )
+    if projection_mode:
+        # Use pre-loaded data filtered to basket benchmarks
+        if full_data_df is not None:
+            df = full_data_df[full_data_df["benchmark"].isin(benchmarks)].copy()
+            # Re-filter models that have enough benchmarks in this basket
+            benchmark_counts = df.groupby("Model")["benchmark"].nunique()
+            valid_models = benchmark_counts[benchmark_counts >= min_benchmarks_per_model].index
+            df = df[df["Model"].isin(valid_models)]
+        else:
+            # Fall back to loading data for this basket
+            print(f"\nLoading benchmark data...")
+            df = prepare_benchmark_data(
+                cache_dir=Path(".cache"),
+                include_benchmarks=benchmarks,
+                min_benchmarks_per_model=min_benchmarks_per_model,
+            )
+    else:
+        # Load data for this basket only (refit mode)
+        print(f"\nLoading benchmark data...")
+        df = prepare_benchmark_data(
+            cache_dir=Path(".cache"),
+            include_benchmarks=benchmarks,
+            min_benchmarks_per_model=min_benchmarks_per_model,
+        )
 
     if len(df) == 0:
         print(f"  WARNING: No data available for {basket_name}")
         return None, None
 
-    print(f"  Loaded {len(df)} performance records")
+    print(f"  Using {len(df)} performance records")
     print(f"  {df['model_id'].nunique()} models, {df['benchmark_id'].nunique()} benchmarks")
 
     # Check which benchmarks are actually present
@@ -120,17 +208,35 @@ def fit_basket(
     if missing:
         print(f"  WARNING: Missing benchmarks: {sorted(missing)}")
 
-    # Fit the model
-    jacobian_type = "analytical" if use_analytical_jacobian else "numerical"
-    print(f"\nFitting IRT model ({jacobian_type} Jacobian, {bootstrap_samples} bootstrap samples)...")
+    if projection_mode:
+        # Fit only capabilities using fixed benchmark parameters
+        print(f"\nFitting model capabilities (benchmark params frozen, {bootstrap_samples} bootstrap samples)...")
 
-    model_df, bench_df = fit_eci_model(
-        df,
-        anchor_benchmark=anchor_benchmark,
-        bootstrap_samples=bootstrap_samples,
-        bootstrap_seed=12345,
-        use_analytical_jacobian=use_analytical_jacobian,
-    )
+        # Filter bench_df to basket benchmarks
+        basket_bench_df = full_bench_df[full_bench_df["benchmark"].isin(benchmarks)].copy()
+
+        model_df = fit_capabilities_given_benchmarks(
+            df,
+            basket_bench_df,
+            bootstrap_samples=bootstrap_samples,
+            bootstrap_seed=12345,
+        )
+
+        # Use the filtered benchmark params for output
+        bench_df = basket_bench_df.copy()
+        bench_df["is_anchor"] = bench_df["benchmark"] == anchor_benchmark
+    else:
+        # Fit the full model from scratch (refit mode)
+        jacobian_type = "analytical" if use_analytical_jacobian else "numerical"
+        print(f"\nFitting IRT model ({jacobian_type} Jacobian, {bootstrap_samples} bootstrap samples)...")
+
+        model_df, bench_df = fit_eci_model(
+            df,
+            anchor_benchmark=anchor_benchmark,
+            bootstrap_samples=bootstrap_samples,
+            bootstrap_seed=12345,
+            use_analytical_jacobian=use_analytical_jacobian,
+        )
 
     # Compute ECI scores (or use raw scores)
     def use_raw_scores():
@@ -190,6 +296,14 @@ Available baskets:
   swe        Software engineering (SWE-Bench, Aider, etc.)
   knowledge  Knowledge and reasoning (MMLU, GPQA, etc.)
   math       Mathematics (FrontierMath, MATH, etc.)
+
+Fitting modes:
+  Default (projection): Fit a full model on all benchmarks first, then
+    estimate model capabilities for each basket using fixed benchmark
+    parameters from the full fit.
+
+  --refit: Fit each basket from scratch, estimating both model capabilities
+    and benchmark parameters using only the benchmarks in that basket.
         """,
     )
     parser.add_argument(
@@ -227,17 +341,43 @@ Available baskets:
         action="store_true",
         help="Output raw capability/difficulty scores without ECI scaling",
     )
+    parser.add_argument(
+        "--refit",
+        action="store_true",
+        help="Refit from scratch for each basket (estimate benchmark params per basket)",
+    )
     args = parser.parse_args()
 
-    for basket_key in args.baskets:
-        fit_basket(
-            basket_key,
+    if args.refit:
+        # Refit mode: fit each basket from scratch
+        for basket_key in args.baskets:
+            fit_basket(
+                basket_key,
+                bootstrap_samples=args.bootstrap_samples,
+                min_benchmarks_per_model=args.min_benchmarks,
+                output_dir=args.output_dir,
+                use_analytical_jacobian=not args.numeric_jacobian,
+                raw=args.raw,
+            )
+    else:
+        # Projection mode (default): fit full model first, then project onto baskets
+        _, full_bench_df, full_data_df = fit_full_model(
             bootstrap_samples=args.bootstrap_samples,
             min_benchmarks_per_model=args.min_benchmarks,
-            output_dir=args.output_dir,
             use_analytical_jacobian=not args.numeric_jacobian,
-            raw=args.raw,
         )
+
+        for basket_key in args.baskets:
+            fit_basket(
+                basket_key,
+                bootstrap_samples=args.bootstrap_samples,
+                min_benchmarks_per_model=args.min_benchmarks,
+                output_dir=args.output_dir,
+                use_analytical_jacobian=not args.numeric_jacobian,
+                raw=args.raw,
+                full_bench_df=full_bench_df,
+                full_data_df=full_data_df,
+            )
 
     print("\n" + "="*60)
     print("Done!")

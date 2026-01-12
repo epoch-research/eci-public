@@ -398,6 +398,169 @@ def fit_eci_model(
     return model_df, bench_df
 
 
+def fit_capabilities_given_benchmarks(
+    df: pd.DataFrame,
+    bench_df: pd.DataFrame,
+    regularization_strength: float = 0.1,
+    performance_clip_eps: float = 1e-3,
+    bootstrap_samples: int = 100,
+    bootstrap_seed: int = 12345,
+    ci_level: float = 0.90,
+) -> pd.DataFrame:
+    """
+    Fit model capabilities while holding benchmark parameters fixed.
+
+    This is useful for "projecting" models onto a pre-fit benchmark space.
+    Given fixed benchmark difficulties and discriminabilities from a full model fit,
+    this function estimates only the model capabilities that best explain
+    the observed performance on a subset of benchmarks.
+
+    Args:
+        df: DataFrame with columns model_id, benchmark_id, performance, benchmark, Model.
+        bench_df: DataFrame with benchmark parameters from a previous fit.
+            Must contain columns: benchmark, difficulty, discriminability.
+        regularization_strength: L2 regularization on capabilities (0-1).
+        performance_clip_eps: Clip performance to [eps, 1-eps] to avoid degeneracy.
+        bootstrap_samples: Number of bootstrap resamples for confidence intervals.
+        bootstrap_seed: Random seed for reproducibility.
+        ci_level: Confidence interval level (e.g., 0.90 for 90% CI).
+
+    Returns:
+        DataFrame with model capabilities and confidence intervals.
+    """
+    df = df.copy()
+
+    # Validate inputs
+    if df["performance"].isna().any():
+        raise ValueError("Performance data contains NaN values")
+    if (df["performance"] < 0).any() or (df["performance"] > 1).any():
+        raise ValueError("Performance scores must be in [0, 1] range")
+
+    # Clip extreme performance values
+    if performance_clip_eps > 0:
+        df["performance"] = df["performance"].clip(
+            performance_clip_eps, 1 - performance_clip_eps
+        )
+
+    # Filter to benchmarks that exist in bench_df
+    bench_params = bench_df.set_index("benchmark")[["difficulty", "discriminability"]].to_dict("index")
+    available_benchmarks = set(bench_params.keys())
+    df = df[df["benchmark"].isin(available_benchmarks)]
+
+    if len(df) == 0:
+        raise ValueError("No benchmark data matches the provided benchmark parameters")
+
+    # Build index mappings
+    model_ids = df["model_id"].unique()
+    n_models = len(model_ids)
+    model_to_idx = {m: i for i, m in enumerate(model_ids)}
+
+    # Map IDs to names
+    id_to_model_name = df.drop_duplicates("model_id").set_index("model_id")["Model"].to_dict()
+
+    # Extract fixed benchmark parameters for each observation
+    benchmark_names = df["benchmark"].values
+    difficulty = np.array([bench_params[b]["difficulty"] for b in benchmark_names])
+    discriminability = np.array([bench_params[b]["discriminability"] for b in benchmark_names])
+
+    # Convert to index arrays
+    model_idx = np.array([model_to_idx[m] for m in df["model_id"]])
+    performance = df["performance"].values
+
+    def sigmoid(x: np.ndarray) -> np.ndarray:
+        x_clipped = np.clip(x, -500, 500)
+        return 1.0 / (1.0 + np.exp(-x_clipped))
+
+    def residuals(capability: np.ndarray) -> np.ndarray:
+        pred = sigmoid(discriminability * (capability[model_idx] - difficulty))
+        resid = pred - performance
+
+        if regularization_strength > 0:
+            reg_penalty = regularization_strength * np.sum(capability**2) / n_models
+            resid = np.append(resid, np.sqrt(reg_penalty))
+
+        return resid
+
+    # Initial values
+    np.random.seed(42)
+    init_capability = np.random.randn(n_models) * 0.1
+
+    # Bounds
+    lower = np.full(n_models, -10)
+    upper = np.full(n_models, 10)
+
+    # Fit
+    result = least_squares(
+        residuals,
+        init_capability,
+        bounds=(lower, upper),
+        method="trf",
+        verbose=0
+    )
+
+    if not result.success:
+        raise RuntimeError(f"Optimization failed: {result.message}")
+
+    capability_hat = result.x
+
+    # Bootstrap for confidence intervals
+    se_capability = np.full(n_models, np.nan)
+    ci_capability_low = np.full(n_models, np.nan)
+    ci_capability_high = np.full(n_models, np.nan)
+
+    if bootstrap_samples > 0:
+        rng = np.random.default_rng(bootstrap_seed)
+        capability_samples = []
+
+        for _ in tqdm(range(bootstrap_samples), desc="Bootstrap", unit="sample"):
+            idx = rng.integers(0, len(performance), size=len(performance))
+            boot_performance = performance[idx]
+            boot_model_idx = model_idx[idx]
+            boot_difficulty = difficulty[idx]
+            boot_discriminability = discriminability[idx]
+
+            def boot_residuals(cap):
+                pred = sigmoid(boot_discriminability * (cap[boot_model_idx] - boot_difficulty))
+                resid = pred - boot_performance
+                if regularization_strength > 0:
+                    reg = regularization_strength * np.sum(cap**2) / n_models
+                    resid = np.append(resid, np.sqrt(reg))
+                return resid
+
+            try:
+                boot_result = least_squares(
+                    boot_residuals,
+                    result.x.copy(),
+                    bounds=(lower, upper),
+                    method="trf",
+                    verbose=0
+                )
+                if boot_result.success:
+                    capability_samples.append(boot_result.x)
+            except Exception:
+                continue
+
+        if len(capability_samples) > 1:
+            cap_arr = np.vstack(capability_samples)
+            se_capability = np.std(cap_arr, axis=0, ddof=1)
+            tail = (1 - ci_level) / 2
+            ci_capability_low = np.quantile(cap_arr, tail, axis=0)
+            ci_capability_high = np.quantile(cap_arr, 1 - tail, axis=0)
+
+    # Build output DataFrame
+    model_names = [id_to_model_name[m] for m in model_ids]
+    model_df = pd.DataFrame({
+        "model_id": model_ids,
+        "Model": model_names,
+        "capability": capability_hat,
+        "capability_se": se_capability,
+        "capability_ci_low": ci_capability_low,
+        "capability_ci_high": ci_capability_high,
+    }).sort_values("capability", ascending=False)
+
+    return model_df
+
+
 def compute_eci_scores(
     model_df: pd.DataFrame,
     bench_df: pd.DataFrame,
