@@ -274,9 +274,12 @@ def fit_basket(
     print(f"\nSaved ECI scores to {eci_output}")
 
     edi_output = output_dir / f"{basket_key}_edi_scores.csv"
-    edi_cols = ["benchmark", "edi", "discriminability_scaled", "is_anchor"]
+    edi_cols = ["benchmark", "edi"]
+    if "edi_ci_low" in edi_df.columns:
+        edi_cols.extend(["edi_ci_low", "edi_ci_high"])
+    edi_cols.extend(["discriminability_scaled", "is_anchor"])
     if "benchmark_release_date" in edi_df.columns:
-        edi_cols.insert(3, "benchmark_release_date")
+        edi_cols.insert(-2, "benchmark_release_date")
     edi_df[edi_cols].to_csv(edi_output, index=False)
     print(f"Saved EDI scores to {edi_output}")
 
