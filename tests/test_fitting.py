@@ -251,5 +251,53 @@ class TestEDIScoreAccuracy:
         assert corr > 0.99, f"Ranking correlation {corr:.6f} is too low"
 
 
+class TestOptionalReturns:
+    """Tests for the opt-in extra return values added for downstream callers."""
+
+    def test_return_bootstrap_samples(self, benchmark_data):
+        model_df, bench_df, bootstrap_data = fit_eci_model(
+            benchmark_data,
+            bootstrap_samples=3,
+            return_bootstrap_samples=True,
+        )
+
+        expected_keys = {
+            "model_ids", "model_names", "benchmark_ids", "benchmark_names",
+            "capability_samples", "difficulty_samples", "discriminability_samples",
+        }
+        assert expected_keys.issubset(bootstrap_data.keys())
+
+        assert len(bootstrap_data["model_names"]) == len(model_df)
+        assert len(bootstrap_data["benchmark_names"]) == len(bench_df)
+
+        for key in ("capability_samples", "difficulty_samples", "discriminability_samples"):
+            samples = bootstrap_data[key]
+            assert len(samples) > 0, f"No samples collected for {key}"
+            assert len(samples) <= 3, f"Got more {key} than requested"
+
+        cap_sample = bootstrap_data["capability_samples"][0]
+        diff_sample = bootstrap_data["difficulty_samples"][0]
+        disc_sample = bootstrap_data["discriminability_samples"][0]
+        assert cap_sample.shape == (len(model_df),)
+        assert diff_sample.shape == (len(bench_df),)
+        assert disc_sample.shape == (len(bench_df),)
+
+    def test_return_scaling(self, benchmark_data):
+        model_df, bench_df = fit_eci_model(benchmark_data, bootstrap_samples=0)
+        eci_df, edi_df, scaling = compute_eci_scores(
+            model_df, bench_df, return_scaling=True,
+        )
+
+        assert set(scaling.keys()) == {
+            "a", "b",
+            "scaling_anchor1", "scaling_anchor1_eci",
+            "scaling_anchor2", "scaling_anchor2_eci",
+        }
+
+        # eci = a + b * capability should reproduce the eci column
+        recomputed = scaling["a"] + scaling["b"] * eci_df["capability"]
+        assert (recomputed - eci_df["eci"]).abs().max() < 1e-6
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
