@@ -47,3 +47,6 @@ packages = ["src/eci"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.uv]
+exclude-newer = "7 days"
