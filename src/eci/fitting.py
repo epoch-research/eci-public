@@ -63,7 +63,8 @@ def fit_eci_model(
     bootstrap_seed: int = 12345,
     ci_level: float = 0.90,
     use_analytical_jacobian: bool = True,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    return_bootstrap_samples: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame] | tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Fit the IRT model to estimate model capabilities and benchmark difficulties.
 
@@ -86,11 +87,17 @@ def fit_eci_model(
         use_analytical_jacobian: If True, use analytical Jacobian for faster optimization.
             If False, use numerical differentiation (slower but may give slightly
             different results due to optimizer path differences).
+        return_bootstrap_samples: If True, additionally return a dict with the raw
+            bootstrap draws (capability, difficulty, discriminability) so callers
+            can build downstream artifacts (e.g. per-sample CIs in viz code).
 
     Returns:
-        Tuple of (model_capabilities_df, benchmark_params_df):
-        - model_capabilities_df: Model names and estimated capabilities
-        - benchmark_params_df: Benchmark names, difficulties, and discriminabilities
+        Tuple of (model_capabilities_df, benchmark_params_df) by default.
+        If return_bootstrap_samples is True, returns a third element: a dict
+        with keys 'model_ids', 'model_names', 'benchmark_ids', 'benchmark_names',
+        'capability_samples', 'difficulty_samples', 'discriminability_samples'.
+        Each *_samples value is a list of length up to bootstrap_samples
+        containing 1-D numpy arrays.
     """
     df = df.copy()
 
@@ -274,10 +281,12 @@ def fit_eci_model(
     ci_difficulty_low = np.full(n_benchmarks, np.nan)
     ci_difficulty_high = np.full(n_benchmarks, np.nan)
 
+    capability_samples: list[np.ndarray] = []
+    difficulty_samples: list[np.ndarray] = []
+    discriminability_samples: list[np.ndarray] = []
+
     if bootstrap_samples > 0:
         rng = np.random.default_rng(bootstrap_seed)
-        capability_samples = []
-        difficulty_samples = []
 
         for _ in tqdm(range(bootstrap_samples), desc="Bootstrap", unit="sample"):
             # Resample with replacement
@@ -347,10 +356,11 @@ def fit_eci_model(
                     verbose=0
                 )
                 if boot_result.success:
-                    cap, diff, _ = unpack_params(boot_result.x)
+                    cap, diff, disc = unpack_params(boot_result.x)
                     shift_b = diff[anchor_idx] - anchor_difficulty
                     capability_samples.append(cap - shift_b)
                     difficulty_samples.append(diff - shift_b)
+                    discriminability_samples.append(disc.copy())
             except Exception:
                 continue
 
@@ -394,6 +404,18 @@ def fit_eci_model(
     if "benchmark_release_date" in df.columns:
         date_map = df.drop_duplicates("benchmark_id").set_index("benchmark_id")["benchmark_release_date"].to_dict()
         bench_df["benchmark_release_date"] = bench_df["benchmark_id"].map(date_map)
+
+    if return_bootstrap_samples:
+        bootstrap_data = {
+            "model_ids": list(model_ids),
+            "model_names": model_names,
+            "benchmark_ids": list(benchmark_ids),
+            "benchmark_names": bench_names,
+            "capability_samples": capability_samples,
+            "difficulty_samples": difficulty_samples,
+            "discriminability_samples": discriminability_samples,
+        }
+        return model_df, bench_df, bootstrap_data
 
     return model_df, bench_df
 
@@ -568,7 +590,8 @@ def compute_eci_scores(
     anchor_eci_low: float = DEFAULT_ANCHOR_ECI_LOW,
     anchor_model_high: str = DEFAULT_ANCHOR_MODEL_HIGH,
     anchor_eci_high: float = DEFAULT_ANCHOR_ECI_HIGH,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    return_scaling: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame] | tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Convert raw capabilities and difficulties to ECI/EDI scale.
 
@@ -585,9 +608,15 @@ def compute_eci_scores(
         anchor_eci_low: ECI value for lower anchor.
         anchor_model_high: Name of model for upper anchor point.
         anchor_eci_high: ECI value for upper anchor.
+        return_scaling: If True, additionally return the linear scaling
+            coefficients (eci = a + b * capability) along with the anchor
+            metadata, so callers can persist/replay the exact transform.
 
     Returns:
-        Tuple of (eci_df, edi_df) with scores on the ECI/EDI scale.
+        Tuple of (eci_df, edi_df) by default. If return_scaling is True,
+        returns a third element: a dict with keys 'a', 'b',
+        'scaling_anchor1', 'scaling_anchor1_eci', 'scaling_anchor2',
+        'scaling_anchor2_eci'.
     """
     # Find anchor capabilities
     low_cap = model_df.loc[model_df["Model"] == anchor_model_low, "capability"]
@@ -625,5 +654,16 @@ def compute_eci_scores(
     if "difficulty_ci_low" in edi_df.columns:
         edi_df["edi_ci_low"] = a + b * edi_df["difficulty_ci_low"]
         edi_df["edi_ci_high"] = a + b * edi_df["difficulty_ci_high"]
+
+    if return_scaling:
+        scaling = {
+            "a": float(a),
+            "b": float(b),
+            "scaling_anchor1": anchor_model_low,
+            "scaling_anchor1_eci": float(anchor_eci_low),
+            "scaling_anchor2": anchor_model_high,
+            "scaling_anchor2_eci": float(anchor_eci_high),
+        }
+        return eci_df, edi_df, scaling
 
     return eci_df, edi_df
