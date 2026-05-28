@@ -200,15 +200,20 @@ def load_model_versions(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """
     Load model version mapping from epoch_capabilities_index.csv.
 
-    Returns DataFrame with columns: model_version, Model, date
+    Returns DataFrame with columns: model_version, Model, date, Organization (if available)
     """
     eci = dfs["epoch_capabilities_index.csv"]
-    versions = eci[["Model version", "Model name", "Release date"]].copy()
-    versions = versions.rename(columns={
+    cols_to_load = ["Model version", "Model name", "Release date"]
+    rename_map = {
         "Model version": "model_version",
         "Model name": "Model",
         "Release date": "date",
-    })
+    }
+    # Include Organization column if available in the source data
+    if "Organization" in eci.columns:
+        cols_to_load.append("Organization")
+    versions = eci[cols_to_load].copy()
+    versions = versions.rename(columns=rename_map)
     versions["date"] = pd.to_datetime(versions["date"], errors="coerce")
     return versions.dropna(subset=["model_version"])
 
