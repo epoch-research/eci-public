@@ -376,7 +376,22 @@ def fit_eci_model(
         "capability_se": se_capability,
         "capability_ci_low": ci_capability_low,
         "capability_ci_high": ci_capability_high,
-    }).sort_values("capability", ascending=False)
+    })
+
+    # Preserve model metadata columns from input (date, Organization, model_version, etc.)
+    # Group by model_id and take the first value for each metadata column
+    metadata_cols = [c for c in df.columns if c not in [
+        "model_id", "benchmark_id", "performance", "benchmark", "Model",
+        "benchmark_release_date", "optimized", "is_math", "is_coding",
+        "random_baseline", "model"
+    ]]
+    if metadata_cols:
+        model_metadata = df.drop_duplicates("model_id").set_index("model_id")[metadata_cols]
+        for col in metadata_cols:
+            if col in model_metadata.columns:
+                model_df[col] = model_df["model_id"].map(model_metadata[col].to_dict())
+
+    model_df = model_df.sort_values("capability", ascending=False)
 
     bench_names = [id_to_bench_name[b] for b in benchmark_ids]
     bench_df = pd.DataFrame({
@@ -556,7 +571,21 @@ def fit_capabilities_given_benchmarks(
         "capability_se": se_capability,
         "capability_ci_low": ci_capability_low,
         "capability_ci_high": ci_capability_high,
-    }).sort_values("capability", ascending=False)
+    })
+
+    # Preserve model metadata columns from input (date, Organization, model_version, etc.)
+    metadata_cols = [c for c in df.columns if c not in [
+        "model_id", "benchmark_id", "performance", "benchmark", "Model",
+        "benchmark_release_date", "optimized", "is_math", "is_coding",
+        "random_baseline", "model"
+    ]]
+    if metadata_cols:
+        model_metadata = df.drop_duplicates("model_id").set_index("model_id")[metadata_cols]
+        for col in metadata_cols:
+            if col in model_metadata.columns:
+                model_df[col] = model_df["model_id"].map(model_metadata[col].to_dict())
+
+    model_df = model_df.sort_values("capability", ascending=False)
 
     return model_df
 

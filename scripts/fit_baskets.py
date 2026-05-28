@@ -270,6 +270,11 @@ def fit_basket(
     eci_cols = ["Model", "eci"]
     if "eci_ci_low" in eci_df.columns:
         eci_cols.extend(["eci_ci_low", "eci_ci_high"])
+    # Include metadata columns if present (date, Organization, model_version, source)
+    metadata_cols = ["date", "Organization", "model_version", "source"]
+    for col in metadata_cols:
+        if col in eci_df.columns:
+            eci_cols.append(col)
     eci_df[eci_cols].to_csv(eci_output, index=False)
     print(f"\nSaved ECI scores to {eci_output}")
 
