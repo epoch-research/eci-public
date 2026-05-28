@@ -13,6 +13,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0  # Full history for proper sync
           persist-credentials: false  # Don't override our custom credentials
 
@@ -22,4 +23,4 @@ jobs:
         run: |
           git config --global url."https://x-access-token:${PUBLIC_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
           git remote add public https://github.com/epoch-research/eci-public.git
-          git push public main:main --force
+          git push public main:main
