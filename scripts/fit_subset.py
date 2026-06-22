@@ -54,6 +54,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from scipy.optimize import least_squares
+
 from eci.fitting import fit_capabilities_given_benchmarks
 
 # Published website artifacts (the same files served at epoch.ai/data/).
@@ -203,6 +205,39 @@ def _fit_and_scale(obs_df, raw_bench_df, scaling, min_benchmarks, bootstrap_samp
         df, bench_df, regularization_strength=0.0,
         bootstrap_samples=bootstrap_samples, bootstrap_seed=12345,
     )
+
+    # Robustness fix. The package fits ALL models in one joint least_squares call.
+    # When a model's benchmarks are all far above its capability, predictions at the
+    # init (~0) are ~0 for every benchmark -> a FLAT loss plateau with no gradient, and
+    # the joint solver can converge a model to a bad point (e.g. Claude Sonnet 4.6 on
+    # math: returns ECI -86, loss 0.85, true optimum +2.0/ECI 151, loss 0.01). Detect
+    # this per model by LOSS: grid-scan each model's own 1-D objective (a scan can't get
+    # stuck on the plateau); if the grid optimum beats the joint fit, adopt it and polish.
+    # Correctly-fit and genuinely-saturated models are left untouched.
+    bp = bench_df.set_index("benchmark")[["difficulty", "discriminability"]]
+    grid = np.linspace(-10.0, 10.0, 801)
+
+    def _loss(cap, d, s, p):
+        pred = 1.0 / (1.0 + np.exp(-np.clip(s * (cap - d), -500, 500)))
+        return float(((pred - p) ** 2).sum())
+
+    refit = 0
+    for idx in model_df.index:
+        obs = df[df["model_id"] == model_df.at[idx, "model_id"]]
+        d = bp.loc[obs["benchmark"], "difficulty"].to_numpy()
+        s = bp.loc[obs["benchmark"], "discriminability"].to_numpy()
+        p = obs["performance"].clip(1e-3, 1 - 1e-3).to_numpy()
+        pred = 1.0 / (1.0 + np.exp(-np.clip(s[None, :] * (grid[:, None] - d[None, :]), -500, 500)))
+        grid_loss = ((pred - p[None, :]) ** 2).sum(axis=1)
+        if grid_loss.min() < _loss(model_df.at[idx, "capability"], d, s, p) - 1e-6:
+            c0 = grid[int(grid_loss.argmin())]
+            r = least_squares(lambda C: 1.0 / (1.0 + np.exp(-np.clip(s * (C - d), -500, 500))) - p,
+                              [c0], bounds=(-10.0, 10.0), method="trf")
+            model_df.at[idx, "capability"] = r.x[0]
+            refit += 1
+    if refit:
+        print(f"    re-fit {refit} poorly-converged model(s) via per-model grid+polish")
+
     # Map raw capability back onto the global ECI scale (b > 0 preserves order).
     model_df["eci"] = a + b * model_df["capability"]
     model_df["eci_ci_low"] = a + b * model_df["capability_ci_low"]
