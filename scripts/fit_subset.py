@@ -65,7 +65,6 @@ PRIVATE_BENCHMARKS = [
     "GeoBench",
     "Fiction.LiveBench",
     "SimpleBench",
-    "DeepResearch Bench",
 ]
 # Best-effort reconciliation of benchmarks.yml `domains` -> edi_scores.csv names.
 # The all-benchmarks --subset all check is the rigorous one; these domain lists
