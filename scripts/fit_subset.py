@@ -39,9 +39,16 @@ import argparse
 import json
 import os
 import subprocess
+from math import isnan
 from pathlib import Path
 
 import pandas as pd
+
+
+def _median(values) -> float:
+    """Median of a numeric iterable, dropping NaNs; NaN if nothing is left."""
+    xs = sorted(v for v in values if not isnan(v))
+    return xs[len(xs) // 2] if xs else float("nan")
 
 # Published website artifacts (the same files served at epoch.ai/data/).
 BASE_URL = "https://epoch.ai/data"
@@ -91,8 +98,6 @@ NAMED_SUBSETS = {
     "private": PRIVATE_BENCHMARKS,
 }
 DEFAULT_SUBSETS = ["math", "swe", "knowledge", "private", "uncontaminated"]
-HAS_WEBSITE_TAB = {"math": True, "swe": True, "knowledge": False, "private": False,
-                   "uncontaminated": False, "all": True}
 SUBSET_CHOICES = list(NAMED_SUBSETS) + ["uncontaminated"]
 
 
@@ -213,7 +218,7 @@ def _esc(s) -> str:
 
 def _svg_scatter(rows, label, sat_threshold=60.0):
     """Inline SVG: general ECI (x) vs subset ECI (y), with the y=x line. Hover for model."""
-    pts = [r for r in rows if r["general_eci"] == r["general_eci"]
+    pts = [r for r in rows if not isnan(r["general_eci"])
            and abs(r["delta"]) <= sat_threshold]
     excluded = len(rows) - len(pts)
     if not pts:
@@ -264,21 +269,20 @@ def _svg_scatter(rows, label, sat_threshold=60.0):
 
 
 def write_comparison_html(rows, label, path):
-    deltas = [r["delta"] for r in rows if r["delta"] == r["delta"]]
-    med = sorted(abs(d) for d in deltas)[len(deltas)//2] if deltas else float("nan")
-    rows_sorted = sorted(rows, key=lambda r: (r["delta"] != r["delta"], -abs(r["delta"])))
+    med = _median(abs(r["delta"]) for r in rows)
+    rows_sorted = sorted(rows, key=lambda r: (isnan(r["delta"]), -abs(r["delta"])))
     body = [f"<tr><th>#</th><th>Model</th><th>General ECI<br>(website)</th>"
             f"<th>{label} ECI<br>(website fit)</th><th>&Delta; (subset&minus;general)</th>"
             f"<th>n&nbsp;benchmarks</th></tr>"]
     for i, r in enumerate(rows_sorted, 1):
         d = r["delta"]
         bg = "#fff"
-        if d == d:
+        if not isnan(d):
             shade = min(abs(d) / 6.0, 1.0)
             bg = (f"rgba(217,83,79,{0.10+0.45*shade:.2f})" if d < 0
                   else f"rgba(65,163,93,{0.10+0.45*shade:.2f})")
-        gen = "" if r["general_eci"] != r["general_eci"] else f'{r["general_eci"]:.2f}'
-        dly = "" if d != d else f"{d:+.2f}"
+        gen = "" if isnan(r["general_eci"]) else f'{r["general_eci"]:.2f}'
+        dly = "" if isnan(d) else f"{d:+.2f}"
         body.append(
             f'<tr><td>{i}</td><td style="text-align:left">{_esc(r["Model"])}</td>'
             f'<td>{gen}</td><td>{r["subset_eci"]:.2f}</td>'
@@ -330,14 +334,12 @@ def write_comparison_html(rows, label, path):
 
 def write_index_html(summaries, out_dir):
     rows = ["<tr><th>Subset</th><th>Models</th><th>Median |&Delta;|</th>"
-            "<th>Max |&Delta;|</th><th>Website tab to compare?</th><th></th></tr>"]
+            "<th>Max |&Delta;|</th><th></th></tr>"]
     for s in summaries:
-        tab = ("yes — eyeball vs the site's domain explorer" if s["has_tab"]
-               else "no live tab (informational)")
         rows.append(
             f'<tr><td style="text-align:left"><b>{s["label"]}</b></td>'
             f'<td>{s["n_models"]}</td><td>{s["median_abs_delta"]:.2f}</td>'
-            f'<td>{s["max_abs_delta"]:.2f}</td><td style="text-align:left">{tab}</td>'
+            f'<td>{s["max_abs_delta"]:.2f}</td>'
             f'<td><a href="{s["label"]}_vs_general.html">open &rarr;</a></td></tr>')
     html = f"""<!doctype html><meta charset="utf-8"><title>Subset ECI vs general</title>
 <style>
@@ -394,18 +396,17 @@ def main():
         rows = build_rows(label, metas[label], fit, general)
         write_comparison_html(rows, label, out_dir / f"{label}_vs_general.html")
         pd.DataFrame(rows).to_csv(out_dir / f"{label}_vs_general.csv", index=False)
-        deltas = [abs(r["delta"]) for r in rows if r["delta"] == r["delta"]]
+        abs_deltas = sorted(abs(r["delta"]) for r in rows if not isnan(r["delta"]))
         summaries.append({
             "label": label, "n_models": len(rows),
-            "median_abs_delta": (sorted(deltas)[len(deltas)//2] if deltas else float("nan")),
-            "max_abs_delta": (max(deltas) if deltas else float("nan")),
-            "has_tab": HAS_WEBSITE_TAB.get(label, False),
+            "median_abs_delta": _median(abs_deltas),
+            "max_abs_delta": (abs_deltas[-1] if abs_deltas else float("nan")),
         })
 
-    print(f"\n  {'subset':14} {'models':>7} {'median|Δ|':>10} {'max|Δ|':>8}  website-tab")
+    print(f"\n  {'subset':14} {'models':>7} {'median|Δ|':>10} {'max|Δ|':>8}")
     for s in summaries:
         print(f"  {s['label']:14} {s['n_models']:7d} {s['median_abs_delta']:10.2f} "
-              f"{s['max_abs_delta']:8.2f}  {'yes' if s['has_tab'] else 'no'}")
+              f"{s['max_abs_delta']:8.2f}")
 
     if len(summaries) > 1:
         write_index_html(summaries, out_dir)
