@@ -1,61 +1,77 @@
 """
-Subset / uncontaminated ECI vs general ECI, computed with the WEBSITE'S OWN code.
+Fit ECI on an arbitrary benchmark subset, *consistently with the website*.
 
-How the fit matches the website (no ambiguity)
-----------------------------------------------
-The website's domain-ECI tabs (Math, SWE, ...) compute each model's subset ECI in
-`epoch-website-astro/legacy/vizs/benchmarks/eciSubsetMath.ts` via `fitModelECI`: a
-per-model 1-D fit on the ECI scale (bounds [-100, 300]) with an analytical starting
-guess + Gauss-Newton + Brent fallback. This script does NOT re-implement that. It
-calls the **real, unmodified `fitModelECI`** from that .ts file via a tiny Node
-harness (`scripts/website_fit.mjs`), so the fit logic is byte-for-byte the website's.
+Why this exists
+---------------
+The website's domain ECIs (Math, SWE, ...) are computed in TypeScript
+(`epoch-website-astro/legacy/vizs/benchmarks/eciSubsetMath.ts`) by a PROJECTION:
 
-Division of labour:
-  - Python (here): download the website's published CSVs, build each model's
-    observations exactly as the site's `computeResults` does
-    (obs = {perf: clamp01(score), edi, slope}; clamp01 = max(.001, min(.999, p))),
-    apply the subset / uncontaminated selection, then render the comparison HTML.
-  - Node (`website_fit.mjs`): import the real `fitModelECI` and run it per model.
+  - freeze each benchmark's difficulty + slope at the published full-fit values,
+  - re-fit ONLY each model's 1-D capability on the selected benchmark subset,
+  - keep ONE global scale (no per-domain re-anchoring).
 
-Inputs are the website's published artifacts (no Airtable, no recompute):
-  - eci_benchmarks.csv : per-(model, benchmark) performance the site fit used
-  - edi_scores.csv     : frozen ECI-scaled benchmark `edi` + `estimated_slope_scaled`
-  - eci_scores.csv     : the published GENERAL ECI, read verbatim (never recomputed)
+`scripts/fit_baskets.py` also projects, but then calls `compute_eci_scores`
+*per basket*, which re-derives the (a, b) scale from the anchor models'
+capabilities WITHIN that basket -> per-basket re-anchoring. That pins the anchor
+models to 130/150 inside every domain and makes the numbers NOT comparable to
+the website's domain tabs (or to the general ECI).
 
-Requirements: Node (>=22, for native TS) and a local checkout of epoch-website-astro
-as a sibling of this repo (or set WEBSITE_ECI_TS to the eciSubsetMath.ts path).
+This script reproduces the website's method instead, so a subset ECI it produces
+is directly comparable to the general ECI and can be sanity-checked against the
+site's Math/SWE tabs. It reuses the SAME `eci` package projection function the
+website's production fit imports (`fit_capabilities_given_benchmarks`), fed with
+the website's OWN published, frozen benchmark parameters.
 
-Usage (run via the project venv; do NOT use `uv run` here -- it writes a uv.lock)
---------------------------------------------------------------------------------
-  .venv/bin/python scripts/fit_subset.py                 # math+swe+knowledge+private+uncontaminated, + index.html
+Correctness details (the easy things to get wrong)
+--------------------------------------------------
+1. Inputs are the website's published artifacts (no Airtable access needed):
+     - eci_benchmarks.csv : the exact per-(model, benchmark) frame the site fit used
+     - edi_scores.csv     : frozen, ECI-scaled benchmark difficulty (`edi`) + slope
+     - eci_scaling.csv    : the single global affine map (a, b)
+2. The website projection is UNREGULARIZED. We pass regularization_strength=0;
+   the package default (0.1) would drag capabilities toward 0.
+3. `fit_capabilities_given_benchmarks` bounds capability to [-10, 10] (raw
+   scale). So we project against RAW difficulty/slope recovered from the scaled
+   published params via (a, b), then map the raw capability back onto the ECI
+   scale with eci = a + b * capability. This is algebraically identical to
+   projecting against the scaled params (the sigmoid argument is invariant), but
+   keeps capability inside the function's bounds.
+
+Usage (run via the project venv; do NOT use `uv run` here — it writes a uv.lock)
+-------------------------------------------------------------------------------
+  .venv/bin/python scripts/fit_subset.py                 # math+swe+knowledge+private, plus index.html
   .venv/bin/python scripts/fit_subset.py --subset private
-  .venv/bin/python scripts/fit_subset.py --subset all    # reproduce the general ECI (sanity check)
+  .venv/bin/python scripts/fit_subset.py --subset math
+  .venv/bin/python scripts/fit_subset.py --subset all    # reassurance: reproduce the general ECI
   .venv/bin/python scripts/fit_subset.py --benchmarks "WeirdML,FrontierMath-2025-02-28-Private"
 
 Open outputs/index.html to see every domain-vs-general comparison in one place.
 """
 
 import argparse
-import json
-import os
-import subprocess
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+
+from scipy.optimize import least_squares
+
+from eci.fitting import fit_capabilities_given_benchmarks
 
 # Published website artifacts (the same files served at epoch.ai/data/).
 BASE_URL = "https://epoch.ai/data"
 ECI_BENCHMARKS_URL = f"{BASE_URL}/eci_benchmarks.csv"
 EDI_SCORES_URL = f"{BASE_URL}/edi_scores.csv"
-ECI_SCORES_URL = f"{BASE_URL}/eci_scores.csv"  # the published general ECI
+ECI_SCALING_URL = f"{BASE_URL}/eci_scaling.csv"
+ECI_SCORES_URL = f"{BASE_URL}/eci_scores.csv"  # general ECI, for validation/comparison
 
-HERE = Path(__file__).resolve().parent
-CACHE_DIR = HERE.parent / ".cache"
+CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
 
 # --- Named subsets -----------------------------------------------------------
 # Source of truth for the private set is context/is-private_manual_list.md.
 # (`is_private` is NOT currently in BENCHMARK_METADATA on this repo; keep the
-# list here while the private-ECI work is experimental.)
+# list here while the private-ECI work is experimental. If it graduates, move it
+# to a single shared home rather than duplicating it.)
 PRIVATE_BENCHMARKS = [
     "Chess Puzzles",
     "WeirdML",
@@ -67,23 +83,41 @@ PRIVATE_BENCHMARKS = [
     "SimpleBench",
     "DeepResearch Bench",
 ]
+
 # Best-effort reconciliation of benchmarks.yml `domains` -> edi_scores.csv names.
-# The all-benchmarks --subset all check is the rigorous one; these domain lists
-# may differ slightly from the live site's tab (alias / benchmark-version diffs).
+# The all-benchmarks --validate check is the rigorous one; these domain lists
+# may differ slightly from the live site's tab (alias / benchmark-version
+# differences), so treat math/swe agreement as "should be close", not exact.
 MATH_BENCHMARKS = [
-    "MATH level 5", "OTIS Mock AIME 2024-2025", "GSM8K",
-    "FrontierMath-2025-02-28-Private", "FrontierMath-Tier-4-2025-07-01-Private",
-    "FrontierMath-Tiers-1-3-v2-Private", "FrontierMath-Tier-4-v2-Private",
+    "MATH level 5",
+    "OTIS Mock AIME 2024-2025",
+    "GSM8K",
+    "FrontierMath-2025-02-28-Private",
+    "FrontierMath-Tier-4-2025-07-01-Private",
+    "FrontierMath-Tiers-1-3-v2-Private",
+    "FrontierMath-Tier-4-v2-Private",
 ]
 SWE_BENCHMARKS = [
-    "Aider polyglot", "SWE-Bench verified", "WeirdML", "Terminal Bench",
-    "GSO-Bench", "Cybench", "PostTrainBench",
+    "Aider polyglot",
+    "SWE-Bench verified",
+    "WeirdML",
+    "Terminal Bench",
+    "GSO-Bench",
+    "Cybench",
+    "PostTrainBench",
 ]
-# Knowledge has NO website tab (it exists only as a fit_baskets.py basket).
+# Knowledge has NO website tab (it exists only as a fit_baskets.py basket), so
+# the knowledge page is informational — there is no live site number to match.
 KNOWLEDGE_BENCHMARKS = [
-    "GPQA diamond", "MMLU", "ARC AI2", "OpenBookQA",
-    "SimpleQA Verified", "ScienceQA", "TriviaQA",
+    "GPQA diamond",
+    "MMLU",
+    "ARC AI2",
+    "OpenBookQA",
+    "SimpleQA Verified",
+    "ScienceQA",
+    "TriviaQA",
 ]
+
 NAMED_SUBSETS = {
     "all": None,  # every benchmark present in edi_scores.csv
     "math": MATH_BENCHMARKS,
@@ -91,13 +125,21 @@ NAMED_SUBSETS = {
     "knowledge": KNOWLEDGE_BENCHMARKS,
     "private": PRIVATE_BENCHMARKS,
 }
+
+# Subsets generated by default (no --subset given). "all" is the reassurance
+# check; the four domains are the comparisons against the site. Which have a
+# live website counterpart to eyeball against:
 DEFAULT_SUBSETS = ["math", "swe", "knowledge", "private", "uncontaminated"]
 HAS_WEBSITE_TAB = {"math": True, "swe": True, "knowledge": False, "private": False,
                    "uncontaminated": False, "all": True}
+# "uncontaminated" is special: not a fixed benchmark list but a per-row date mask.
 SUBSET_CHOICES = list(NAMED_SUBSETS) + ["uncontaminated"]
 
 
-# --- data loading ------------------------------------------------------------
+def _esc(s) -> str:
+    """Minimal HTML escape for model names in SVG/table text."""
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
 
 def _load_csv(url: str, cache_name: str, use_cache: bool) -> pd.DataFrame:
     """Read a published CSV, caching to .cache/ so repeated runs are offline-friendly."""
@@ -111,114 +153,179 @@ def _load_csv(url: str, cache_name: str, use_cache: bool) -> pd.DataFrame:
     return df
 
 
-def load_obs_source(use_cache: bool = True) -> pd.DataFrame:
-    """Per-(model, benchmark) frame joined with the frozen ECI-scaled params.
+def load_inputs(use_cache: bool = True):
+    """Return (benchmarks_df, raw_bench_df, scaling) ready for projection.
 
-    Columns: Model, benchmark, performance, edi, slope, benchmark_release_date, date.
-    Inner join on benchmark drops benchmarks with no published params (the website's
-    `bmMap[bmName]` check does the same).
+    raw_bench_df has columns [benchmark, difficulty, discriminability] on the RAW
+    IRT scale (recovered from the published, ECI-scaled edi/slope), as required by
+    `fit_capabilities_given_benchmarks`.
     """
-    bench = _load_csv(ECI_BENCHMARKS_URL, "eci_benchmarks.csv", use_cache)
-    edi = _load_csv(EDI_SCORES_URL, "edi_scores.csv", use_cache).rename(
-        columns={"benchmark_name": "benchmark", "estimated_slope_scaled": "slope"})
-    obs = bench.merge(edi[["benchmark", "edi", "slope"]], on="benchmark", how="inner")
-    obs = obs.dropna(subset=["performance", "edi", "slope"])
-    keep = ["Model", "benchmark", "performance", "edi", "slope", "benchmark_release_date", "date"]
-    return obs[keep].copy()
+    benchmarks_df = _load_csv(ECI_BENCHMARKS_URL, "eci_benchmarks.csv", use_cache)
+    edi_df = _load_csv(EDI_SCORES_URL, "edi_scores.csv", use_cache)
+    scaling = _load_csv(ECI_SCALING_URL, "eci_scaling.csv", use_cache).iloc[0]
+
+    a, b = float(scaling["a"]), float(scaling["b"])
+
+    # Invert the global affine map to recover raw benchmark params:
+    #   edi = a + b * difficulty            -> difficulty = (edi - a) / b
+    #   slope_scaled = discriminability / b -> discriminability = slope_scaled * b
+    raw_bench_df = pd.DataFrame(
+        {
+            "benchmark": edi_df["benchmark_name"],
+            "difficulty": (edi_df["edi"] - a) / b,
+            "discriminability": edi_df["estimated_slope_scaled"] * b,
+        }
+    )
+    return benchmarks_df, raw_bench_df, (a, b)
 
 
-def load_general_eci(use_cache: bool = True) -> dict:
-    """Published general ECI as {Model: eci} -- read verbatim, never recomputed."""
-    g = _load_csv(ECI_SCORES_URL, "eci_scores.csv", use_cache)
-    return dict(zip(g["Model"], g["eci"]))
+def _fit_and_scale(obs_df, raw_bench_df, scaling, min_benchmarks, bootstrap_samples, msg):
+    """Project the given observations onto the frozen params and return ECI-scaled scores.
+
+    Shared core for both project_subset and project_uncontaminated. Returns a frame
+    sorted by eci desc: Model, eci, eci_ci_low, eci_ci_high, n_benchmarks, date (if present).
+    """
+    a, b = scaling
+    # Keep only observations whose benchmark has published frozen params.
+    bench_names = set(raw_bench_df["benchmark"])
+    df = obs_df[obs_df["benchmark"].isin(bench_names)].copy()
+    counts = df.groupby("model_id")["benchmark"].nunique()
+    keep = counts[counts >= min_benchmarks].index
+    dropped = counts.size - len(keep)
+    df = df[df["model_id"].isin(keep)]
+    if df.empty:
+        raise ValueError(f"No model has >= {min_benchmarks} benchmarks in the {msg} set.")
+    bench_df = raw_bench_df[raw_bench_df["benchmark"].isin(set(df["benchmark"]))].copy()
+
+    print(f"  {msg}: {df['benchmark'].nunique()} benchmark(s) x {df['model_id'].nunique()} model(s) "
+          f"({dropped} models dropped below min-benchmarks={min_benchmarks})...")
+
+    # The website projection is UNREGULARIZED -> regularization_strength=0.
+    model_df = fit_capabilities_given_benchmarks(
+        df, bench_df, regularization_strength=0.0,
+        bootstrap_samples=bootstrap_samples, bootstrap_seed=12345,
+    )
+
+    # Robustness fix. The package fits ALL models in one joint least_squares call.
+    # When a model's benchmarks are all far above its capability, predictions at the
+    # init (~0) are ~0 for every benchmark -> a FLAT loss plateau with no gradient, and
+    # the joint solver can converge a model to a bad point (e.g. Claude Sonnet 4.6 on
+    # math: returns ECI -86, loss 0.85, true optimum +2.0/ECI 151, loss 0.01). Detect
+    # this per model by LOSS: grid-scan each model's own 1-D objective (a scan can't get
+    # stuck on the plateau); if the grid optimum beats the joint fit, adopt it and polish.
+    # Correctly-fit and genuinely-saturated models are left untouched.
+    bp = bench_df.set_index("benchmark")[["difficulty", "discriminability"]]
+    grid = np.linspace(-10.0, 10.0, 801)
+
+    def _loss(cap, d, s, p):
+        pred = 1.0 / (1.0 + np.exp(-np.clip(s * (cap - d), -500, 500)))
+        return float(((pred - p) ** 2).sum())
+
+    refit = 0
+    for idx in model_df.index:
+        obs = df[df["model_id"] == model_df.at[idx, "model_id"]]
+        d = bp.loc[obs["benchmark"], "difficulty"].to_numpy()
+        s = bp.loc[obs["benchmark"], "discriminability"].to_numpy()
+        p = obs["performance"].clip(1e-3, 1 - 1e-3).to_numpy()
+        pred = 1.0 / (1.0 + np.exp(-np.clip(s[None, :] * (grid[:, None] - d[None, :]), -500, 500)))
+        grid_loss = ((pred - p[None, :]) ** 2).sum(axis=1)
+        if grid_loss.min() < _loss(model_df.at[idx, "capability"], d, s, p) - 1e-6:
+            c0 = grid[int(grid_loss.argmin())]
+            r = least_squares(lambda C: 1.0 / (1.0 + np.exp(-np.clip(s * (C - d), -500, 500))) - p,
+                              [c0], bounds=(-10.0, 10.0), method="trf")
+            model_df.at[idx, "capability"] = r.x[0]
+            refit += 1
+    if refit:
+        print(f"    re-fit {refit} poorly-converged model(s) via per-model grid+polish")
+
+    # Map raw capability back onto the global ECI scale (b > 0 preserves order).
+    model_df["eci"] = a + b * model_df["capability"]
+    model_df["eci_ci_low"] = a + b * model_df["capability_ci_low"]
+    model_df["eci_ci_high"] = a + b * model_df["capability_ci_high"]
+    n_by_model = df.groupby("model_id")["benchmark"].nunique()
+    model_df["n_benchmarks"] = model_df["model_id"].map(n_by_model)
+
+    cols = ["Model", "eci", "eci_ci_low", "eci_ci_high", "n_benchmarks"]
+    if "date" in model_df.columns:
+        cols.append("date")
+    return model_df[cols].sort_values("eci", ascending=False).reset_index(drop=True)
 
 
-def _clamp01(p: float) -> float:
-    """Verbatim port of the website's clamp01 (eciSubsetMath.ts)."""
-    return max(0.001, min(0.999, p))
-
-
-# --- observation building (mirrors computeResults) ---------------------------
-
-def select_rows(obs_source: pd.DataFrame, label: str, subset) -> pd.DataFrame:
-    """Apply the subset filter, or the per-(model,benchmark) 'uncontaminated' date mask."""
-    if label == "uncontaminated":
-        bd = pd.to_datetime(obs_source["benchmark_release_date"], errors="coerce")
-        md = pd.to_datetime(obs_source["date"], errors="coerce")
-        is_private = obs_source["benchmark"].isin(set(PRIVATE_BENCHMARKS))
-        released_after = bd > md  # NaN comparisons -> False (conservative)
-        kept = obs_source[is_private | released_after]
-        print(f"  uncontaminated mask: kept {len(kept)}/{len(obs_source)} obs "
-              f"({int(is_private.sum())} private + {int((released_after & ~is_private).sum())} released-after-model)")
-        return kept
+def project_subset(benchmarks_df, raw_bench_df, scaling, subset, min_benchmarks=3, bootstrap_samples=0):
+    """Project models onto a fixed benchmark `subset` (None = all benchmarks)."""
+    available = set(raw_bench_df["benchmark"])
     if subset is None:
-        return obs_source
-    return obs_source[obs_source["benchmark"].isin(set(subset))]
+        subset_names = sorted(available)
+    else:
+        subset_names = [bm for bm in subset if bm in available]
+        missing = [bm for bm in subset if bm not in available]
+        if missing:
+            print(f"  NOTE: {len(missing)} requested benchmark(s) absent from edi_scores.csv: {missing}")
+    if not subset_names:
+        raise ValueError("None of the requested benchmarks are available.")
+    obs = benchmarks_df[benchmarks_df["benchmark"].isin(subset_names)].copy()
+    return _fit_and_scale(obs, raw_bench_df, scaling, min_benchmarks, bootstrap_samples,
+                          f"{len(subset_names)}-benchmark subset")
 
 
-def build_items(obs_source, label, subset, min_benchmarks):
-    """Return (items, meta): per-model observations for the Node fit, keyed by id."""
-    df = select_rows(obs_source, label, subset)
-    items, meta = [], {}
-    for model, g in df.groupby("Model"):
-        if len(g) < min_benchmarks:
-            continue
-        obs = [[_clamp01(p), float(e), float(s)]
-               for p, e, s in zip(g["performance"], g["edi"], g["slope"])]
-        items.append({"id": f"{label}|||{model}", "obs": obs})
-        meta[model] = len(obs)
-    print(f"  [{label}] {df['benchmark'].nunique()} benchmark(s) -> {len(items)} model(s) "
-          f"(min-benchmarks={min_benchmarks})")
-    return items, meta
+def uncontaminated_observations(benchmarks_df, private_set):
+    """Per-(model, benchmark) mask: keep a score iff the benchmark is private OR it was
+    released AFTER the model (so the model could not have trained on it).
+
+    Uses only `benchmark_release_date` and the model `date` -- both already in
+    eci_benchmarks.csv, so this needs no external data. Unlike a fixed subset this is a
+    ROW filter: a given benchmark counts for late models but is dropped for early ones.
+    Rows with a missing date (and not private) are dropped -- can't prove uncontaminated.
+    """
+    df = benchmarks_df.copy()
+    bench_date = pd.to_datetime(df["benchmark_release_date"], errors="coerce")
+    model_date = pd.to_datetime(df["date"], errors="coerce")
+    is_private = df["benchmark"].isin(set(private_set))
+    released_after_model = bench_date > model_date  # NaN comparisons -> False (conservative)
+    kept = df[is_private | released_after_model].copy()
+    n_priv = int(is_private.sum())
+    n_after = int((released_after_model & ~is_private).sum())
+    print(f"  uncontaminated mask: kept {len(kept)}/{len(df)} obs "
+          f"({n_priv} private + {n_after} released-after-model)")
+    return kept
 
 
-# --- the website fit (Node) --------------------------------------------------
-
-def run_website_fit(all_items, out_dir, website_ts=None) -> dict:
-    """Run the REAL website fitModelECI over all items via the Node harness."""
-    in_path, out_path = out_dir / "_fit_in.json", out_dir / "_fit_out.json"
-    in_path.write_text(json.dumps({"items": all_items}))
-    env = dict(os.environ)
-    if website_ts:
-        env["WEBSITE_ECI_TS"] = str(website_ts)
-    cmd = ["node", "--import", str(HERE / "_website_fit_register.mjs"),
-           str(HERE / "website_fit.mjs"), str(in_path), str(out_path)]
-    try:
-        subprocess.run(cmd, check=True, env=env)
-    except FileNotFoundError:
-        raise SystemExit("ERROR: `node` not found. Install Node >=22 (native TypeScript).")
-    except subprocess.CalledProcessError as e:
-        raise SystemExit(f"ERROR: website fit failed (exit {e.returncode}). "
-                         f"Is epoch-website-astro a sibling repo, or WEBSITE_ECI_TS set?")
-    return json.loads(out_path.read_text())
+def project_uncontaminated(benchmarks_df, raw_bench_df, scaling, private_set,
+                           min_benchmarks=3, bootstrap_samples=0):
+    """Project each model on only the scores it could not have been contaminated by."""
+    obs = uncontaminated_observations(benchmarks_df, private_set)
+    return _fit_and_scale(obs, raw_bench_df, scaling, min_benchmarks, bootstrap_samples,
+                          "uncontaminated")
 
 
-def build_rows(label, meta, fit, general):
-    """Combine the website fit with the published general ECI -> row dicts."""
-    rows = []
-    for model, n in meta.items():
-        eci = fit.get(f"{label}|||{model}")
-        if eci is None:  # fitModelECI returned null (e.g. degenerate obs)
-            continue
-        gen = general.get(model, float("nan"))
-        rows.append({"Model": model, "subset_eci": eci, "general_eci": gen,
-                     "delta": eci - gen, "n_benchmarks": n})
-    return rows
+def load_general_eci(use_cache: bool = True) -> pd.DataFrame:
+    """Published general ECI, keyed by Model (= model_group), for compare/validate."""
+    g = _load_csv(ECI_SCORES_URL, "eci_scores.csv", use_cache)
+    return g[["Model", "eci"]].rename(columns={"eci": "general_eci"})
 
 
-# --- presentation ------------------------------------------------------------
+def add_general_comparison(result: pd.DataFrame, use_cache: bool = True) -> pd.DataFrame:
+    """Attach general ECI and the domain-minus-general delta (the interesting quantity)."""
+    merged = result.merge(load_general_eci(use_cache), on="Model", how="left")
+    merged["delta_vs_general"] = merged["eci"] - merged["general_eci"]
+    return merged
 
-def _esc(s) -> str:
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+def _svg_scatter(rows: list[dict], label: str, sat_threshold: float = 30.0) -> str:
+    """Inline SVG: general ECI (x) vs subset ECI (y), with the y=x line.
 
-def _svg_scatter(rows, label, sat_threshold=60.0):
-    """Inline SVG: general ECI (x) vs subset ECI (y), with the y=x line. Hover for model."""
-    pts = [r for r in rows if r["general_eci"] == r["general_eci"]
+    Points on the diagonal agree; points below it score lower on the subset than
+    their general ECI (for a private subset, a sign of benchmaxxing on public
+    benchmarks). Saturated outliers (|delta| > sat_threshold, e.g. a model that
+    aces every subset benchmark and hits the capability bound) are excluded from
+    the plot so they don't wreck the scale; they remain in the table.
+    """
+    pts = [r for r in rows if r["general_eci"] == r["general_eci"]  # not NaN
            and abs(r["delta"]) <= sat_threshold]
     excluded = len(rows) - len(pts)
     if not pts:
         return "<p><em>No plottable points.</em></p>"
+
     vals = [r["general_eci"] for r in pts] + [r["subset_eci"] for r in pts]
     lo, hi = min(vals), max(vals)
     pad = (hi - lo) * 0.06 or 1.0
@@ -231,9 +338,11 @@ def _svg_scatter(rows, label, sat_threshold=60.0):
 
     parts = [f'<svg width="{M*2+inner}" height="{M*2+inner}" '
              f'style="font-family:system-ui,sans-serif;font-size:12px;background:#fff">']
+    # axes box + y=x diagonal
     parts.append(f'<rect x="{M}" y="{M}" width="{inner}" height="{inner}" fill="none" stroke="#ccc"/>')
     parts.append(f'<line x1="{px(lo)}" y1="{py(lo)}" x2="{px(hi)}" y2="{py(hi)}" '
                  f'stroke="#999" stroke-dasharray="4 4"/>')
+    # gridline ticks every 10 ECI points
     t = int(lo // 10 * 10)
     while t <= hi:
         if t >= lo:
@@ -242,34 +351,39 @@ def _svg_scatter(rows, label, sat_threshold=60.0):
             parts.append(f'<text x="{px(t)}" y="{M+inner+16}" text-anchor="middle" fill="#888">{t}</text>')
             parts.append(f'<text x="{M-10}" y="{py(t)+4}" text-anchor="end" fill="#888">{t}</text>')
         t += 10
+    # points (red = below diagonal / worse on subset; green = above)
     labelled = sorted(pts, key=lambda r: -abs(r["delta"]))[:6]
     for r in pts:
         color = "#d9534f" if r["delta"] < 0 else "#41a35d"
         tip = (f'{r["Model"]}  —  general {r["general_eci"]:.2f} / {label} {r["subset_eci"]:.2f}'
                f'  —  Δ {r["delta"]:+.2f}  (n={r["n_benchmarks"]})')
-        parts.append(f'<circle class="pt" data-tip="{_esc(tip).replace(chr(34), "&quot;")}" '
+        data_tip = _esc(tip).replace('"', "&quot;")
+        parts.append(f'<circle class="pt" data-tip="{data_tip}" '
                      f'cx="{px(r["general_eci"]):.1f}" cy="{py(r["subset_eci"]):.1f}" '
-                     f'r="5" fill="{color}" fill-opacity="0.55" stroke="{color}" style="cursor:pointer"/>')
+                     f'r="5" fill="{color}" fill-opacity="0.55" stroke="{color}" '
+                     f'style="cursor:pointer"/>')
     for r in labelled:
         parts.append(f'<text x="{px(r["general_eci"])+6:.1f}" y="{py(r["subset_eci"])+3:.1f}" '
                      f'fill="#333">{_esc(r["Model"])} ({r["delta"]:+.1f})</text>')
     parts.append(f'<text x="{M+inner/2}" y="{M+inner+40}" text-anchor="middle" '
                  f'fill="#555">General ECI (from website)</text>')
     parts.append(f'<text x="20" y="{M+inner/2}" text-anchor="middle" fill="#555" '
-                 f'transform="rotate(-90 20 {M+inner/2})">{label}-subset ECI (website fit)</text>')
+                 f'transform="rotate(-90 20 {M+inner/2})">{label}-subset ECI (computed)</text>')
     if excluded:
         parts.append(f'<text x="{M}" y="{M-16}" fill="#b3801f">'
-                     f'{excluded} model(s) beyond ±{sat_threshold:.0f} excluded from plot (see table)</text>')
+                     f'{excluded} saturated model(s) excluded from plot (see table)</text>')
     parts.append("</svg>")
     return "".join(parts)
 
 
-def write_comparison_html(rows, label, path):
+def write_comparison_html(rows: list[dict], label: str, path: Path) -> None:
+    """One self-contained page: scatter + a full sorted table. No dependencies."""
     deltas = [r["delta"] for r in rows if r["delta"] == r["delta"]]
     med = sorted(abs(d) for d in deltas)[len(deltas)//2] if deltas else float("nan")
     rows_sorted = sorted(rows, key=lambda r: (r["delta"] != r["delta"], -abs(r["delta"])))
+
     body = [f"<tr><th>#</th><th>Model</th><th>General ECI<br>(website)</th>"
-            f"<th>{label} ECI<br>(website fit)</th><th>&Delta; (subset&minus;general)</th>"
+            f"<th>{label} ECI<br>(computed)</th><th>&Delta; (subset&minus;general)</th>"
             f"<th>n&nbsp;benchmarks</th></tr>"]
     for i, r in enumerate(rows_sorted, 1):
         d = r["delta"]
@@ -284,6 +398,7 @@ def write_comparison_html(rows, label, path):
             f'<tr><td>{i}</td><td style="text-align:left">{_esc(r["Model"])}</td>'
             f'<td>{gen}</td><td>{r["subset_eci"]:.2f}</td>'
             f'<td style="background:{bg}">{dly}</td><td>{r["n_benchmarks"]}</td></tr>')
+
     html = f"""<!doctype html><meta charset="utf-8">
 <title>{label} subset ECI vs general</title>
 <style>
@@ -301,8 +416,8 @@ def write_comparison_html(rows, label, path):
 <h2>{label}-subset ECI vs general ECI &mdash; {len(rows)} models</h2>
 <p class="note">
  <b>General ECI</b> is read verbatim from the website's <code>eci_scores.csv</code> (the exact number on the site).<br>
- <b>{label} ECI</b> is computed by the website's own <code>fitModelECI</code> (run unmodified via Node) on the
- frozen <code>edi_scores.csv</code> params &mdash; identical logic to the site's domain tabs.<br>
+ <b>{label} ECI</b> is the only computed value: a projection onto the {label} benchmark subset using the
+ website's frozen <code>edi_scores.csv</code> params (same method the site's domain tabs use).<br>
  <b>&Delta; &lt; 0</b> (red) = the model scores <i>lower</i> on the subset than its overall ECI implies.
  For the <code>private</code>/<code>uncontaminated</code> subsets that is the benchmaxxing signal.
  Median |&Delta;| = {med:.2f} ECI points. <i>Hover a point for the model.</i>
@@ -329,7 +444,46 @@ def write_comparison_html(rows, label, path):
     path.write_text(html)
 
 
-def write_index_html(summaries, out_dir):
+def build_rows(result: pd.DataFrame, use_cache: bool) -> list[dict]:
+    """Merge computed subset ECI with website general ECI -> list of row dicts."""
+    g = load_general_eci(use_cache)
+    merged = result.merge(g, on="Model", how="left")
+    merged["delta"] = merged["eci"] - merged["general_eci"]
+    return [
+        {"Model": r["Model"], "subset_eci": r["eci"], "general_eci": r["general_eci"],
+         "delta": r["delta"], "n_benchmarks": int(r["n_benchmarks"])}
+        for _, r in merged.iterrows()
+    ]
+
+
+def run_subset(label, subset, benchmarks_df, raw_bench_df, scaling, out_dir, args):
+    """Compute one subset-vs-general comparison; write its HTML + CSV; return a summary dict."""
+    # "all" recomputes the general ECI to show it reproduces the website's file
+    # (reassurance only; in real use you read the general ECI, never recompute it).
+    min_bm = 1 if label == "all" else args.min_benchmarks
+    if label == "uncontaminated":
+        result = project_uncontaminated(benchmarks_df, raw_bench_df, scaling, PRIVATE_BENCHMARKS,
+                                        min_benchmarks=min_bm, bootstrap_samples=args.bootstrap_samples)
+    else:
+        result = project_subset(benchmarks_df, raw_bench_df, scaling, subset,
+                                min_benchmarks=min_bm, bootstrap_samples=args.bootstrap_samples)
+    rows = build_rows(result, use_cache=not args.no_cache)
+
+    write_comparison_html(rows, label, out_dir / f"{label}_vs_general.html")
+    pd.DataFrame(rows).to_csv(out_dir / f"{label}_vs_general.csv", index=False)
+
+    deltas = [abs(r["delta"]) for r in rows if r["delta"] == r["delta"]]
+    return {
+        "label": label,
+        "n_models": len(rows),
+        "median_abs_delta": (sorted(deltas)[len(deltas)//2] if deltas else float("nan")),
+        "max_abs_delta": (max(deltas) if deltas else float("nan")),
+        "has_tab": HAS_WEBSITE_TAB.get(label, False),
+    }
+
+
+def write_index_html(summaries: list[dict], out_dir: Path) -> None:
+    """Landing page linking each subset comparison, with at-a-glance spread stats."""
     rows = ["<tr><th>Subset</th><th>Models</th><th>Median |&Delta;|</th>"
             "<th>Max |&Delta;|</th><th>Website tab to compare?</th><th></th></tr>"]
     for s in summaries:
@@ -348,32 +502,31 @@ def write_index_html(summaries, out_dir):
  .note{{color:#555;line-height:1.5}}
 </style>
 <h2>Subset ECI vs general ECI</h2>
-<p class="note">Each page is computed by the website's own <code>fitModelECI</code> (run unmodified via Node)
-and compared to the general ECI read verbatim from <code>eci_scores.csv</code>. Hover any point to see the model.
-Bigger median |&Delta;| = the subset disagrees more with the overall ECI.</p>
+<p class="note">Each page projects models onto a benchmark subset (the website's own
+frozen params + method) and compares to the general ECI read verbatim from
+<code>eci_scores.csv</code>. Hover any point to see the model. Bigger median |&Delta;|
+= the subset disagrees more with the overall ECI.</p>
 <table>{''.join(rows)}</table>
 """
     (out_dir / "index.html").write_text(html)
 
 
-# --- orchestration -----------------------------------------------------------
-
-def main():
+def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = p.add_mutually_exclusive_group()
     g.add_argument("--subset", choices=SUBSET_CHOICES,
                    help="Run one named subset (incl. 'uncontaminated'). Omit to run all + index.html.")
     g.add_argument("--benchmarks", help="Comma-separated explicit benchmark names (edi_scores.csv naming).")
-    p.add_argument("--min-benchmarks", type=int, default=2,
-                   help="Min benchmarks per model (default 2, matching the site's subset explorer).")
-    p.add_argument("--website-ts", help="Path to eciSubsetMath.ts (else sibling epoch-website-astro / $WEBSITE_ECI_TS).")
+    p.add_argument("--min-benchmarks", type=int, default=3,
+                   help="Min distinct subset benchmarks per model (site uses 2). Default 3.")
+    p.add_argument("--bootstrap-samples", type=int, default=0,
+                   help="Bootstrap resamples for CIs (0 = skip; note: site CI method differs).")
     p.add_argument("--no-cache", action="store_true", help="Always re-download published CSVs.")
     args = p.parse_args()
 
-    out_dir = HERE.parent / "outputs"
+    out_dir = Path(__file__).resolve().parent.parent / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    obs_source = load_obs_source(use_cache=not args.no_cache)
-    general = load_general_eci(use_cache=not args.no_cache)
+    benchmarks_df, raw_bench_df, scaling = load_inputs(use_cache=not args.no_cache)
 
     if args.benchmarks:
         jobs = [("custom", [b.strip() for b in args.benchmarks.split(",") if b.strip()])]
@@ -382,30 +535,14 @@ def main():
     else:
         jobs = [(lbl, NAMED_SUBSETS.get(lbl)) for lbl in DEFAULT_SUBSETS]
 
-    all_items, metas = [], {}
-    for label, subset in jobs:
-        items, meta = build_items(obs_source, label, subset, args.min_benchmarks)
-        all_items += items
-        metas[label] = meta
-
-    fit = run_website_fit(all_items, out_dir, website_ts=args.website_ts)
-
     summaries = []
-    for label, _ in jobs:
-        rows = build_rows(label, metas[label], fit, general)
-        write_comparison_html(rows, label, out_dir / f"{label}_vs_general.html")
-        pd.DataFrame(rows).to_csv(out_dir / f"{label}_vs_general.csv", index=False)
-        deltas = [abs(r["delta"]) for r in rows if r["delta"] == r["delta"]]
-        summaries.append({
-            "label": label, "n_models": len(rows),
-            "median_abs_delta": (sorted(deltas)[len(deltas)//2] if deltas else float("nan")),
-            "max_abs_delta": (max(deltas) if deltas else float("nan")),
-            "has_tab": HAS_WEBSITE_TAB.get(label, False),
-        })
+    for label, subset in jobs:
+        print(f"\n[{label}]")
+        summaries.append(run_subset(label, subset, benchmarks_df, raw_bench_df, scaling, out_dir, args))
 
-    print(f"\n  {'subset':14} {'models':>7} {'median|Δ|':>10} {'max|Δ|':>8}  website-tab")
+    print(f"\n  {'subset':10} {'models':>7} {'median|Δ|':>10} {'max|Δ|':>8}  website-tab")
     for s in summaries:
-        print(f"  {s['label']:14} {s['n_models']:7d} {s['median_abs_delta']:10.2f} "
+        print(f"  {s['label']:10} {s['n_models']:7d} {s['median_abs_delta']:10.2f} "
               f"{s['max_abs_delta']:8.2f}  {'yes' if s['has_tab'] else 'no'}")
 
     if len(summaries) > 1:
