@@ -24,12 +24,20 @@ pip install -e .
 # Fit model and save results to outputs/
 python scripts/fit_eci.py
 
-# With more bootstrap samples for more precise confidence intervals
-python scripts/fit_eci.py --bootstrap-samples 500
+# With fewer bootstrap samples for a quicker run
+python scripts/fit_eci.py --bootstrap-samples 100
 
 # Use numerical Jacobian (slower, matches website exactly)
 python scripts/fit_eci.py --numeric-jacobian
+
+# Use a different bootstrap scheme for confidence intervals
+python scripts/fit_eci.py --bootstrap-method observation
 ```
+
+Available bootstrap methods (`--bootstrap-method` / `bootstrap_method=`):
+
+- `hierarchical` (default): hold the set of models fixed and resample each model's benchmark results with replacement, so no model ever loses all its observations.
+- `observation`: resample all (model, benchmark) observations with replacement from the pooled data.
 
 ### Python API
 

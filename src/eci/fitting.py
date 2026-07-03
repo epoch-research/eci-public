@@ -17,7 +17,7 @@ where:
 import numpy as np
 import pandas as pd
 from scipy.optimize import least_squares
-from scipy.sparse import lil_matrix
+from scipy.sparse import coo_matrix
 from tqdm import tqdm
 
 
@@ -31,6 +31,156 @@ DEFAULT_ANCHOR_ECI_HIGH = 150.0
 DEFAULT_ANCHOR_BENCHMARK = "Winogrande"
 DEFAULT_ANCHOR_DIFFICULTY = 0.0
 DEFAULT_ANCHOR_DISCRIMINABILITY = 1.0
+
+# Supported bootstrap resampling schemes
+BOOTSTRAP_METHODS = ("hierarchical", "observation")
+
+
+def _validate_bootstrap_method(bootstrap_method: str) -> None:
+    if bootstrap_method not in BOOTSTRAP_METHODS:
+        raise ValueError(
+            f"Unknown bootstrap_method '{bootstrap_method}'; "
+            f"expected one of {BOOTSTRAP_METHODS}"
+        )
+
+
+def _bootstrap_indices(
+    rng: np.random.Generator,
+    bootstrap_method: str,
+    n_obs: int,
+    rows_by_model: list[np.ndarray] | None,
+) -> np.ndarray:
+    """Draw one bootstrap resample of observation indices."""
+    if bootstrap_method == "hierarchical":
+        # Hold models fixed; resample each model's results with replacement
+        return np.concatenate([
+            rng.choice(rows, size=rows.size, replace=True)
+            for rows in rows_by_model
+        ])
+    return rng.integers(0, n_obs, size=n_obs)
+
+
+def _sigmoid_derivative(
+    capability: np.ndarray,
+    difficulty: np.ndarray,
+    discriminability: np.ndarray,
+    model_idx: np.ndarray,
+    bench_idx: np.ndarray,
+) -> np.ndarray:
+    z = discriminability[bench_idx] * (capability[model_idx] - difficulty[bench_idx])
+    s = 1.0 / (1.0 + np.exp(-np.clip(z, -500, 500)))
+    return s * (1 - s)
+
+
+def _irt_jacobian(
+    capability: np.ndarray,
+    difficulty: np.ndarray,
+    discriminability: np.ndarray,
+    model_idx: np.ndarray,
+    bench_idx: np.ndarray,
+    anchor_idx: int,
+    anchor_discriminability: float,
+    n_models: int,
+    n_benchmarks: int,
+    n_params: int,
+    regularization_strength: float,
+):
+    """
+    Sparse Jacobian of the residual vector for the full IRT model.
+
+    Vectorized COO assembly; numerically identical to looping over
+    observations, but without Python-level per-observation cost.
+    """
+    n_obs = len(model_idx)
+    ds = _sigmoid_derivative(capability, difficulty, discriminability, model_idx, bench_idx)
+    obs_rows = np.arange(n_obs)
+
+    # d(resid_i)/d(cap_m), d(resid_i)/d(diff_b), d(resid_i)/d(discrim_b)
+    cap_vals = ds * discriminability[bench_idx]
+    diff_vals = -ds * discriminability[bench_idx]
+    discrim_vals = ds * (capability[model_idx] - difficulty[bench_idx])
+
+    # Free-discriminability parameter columns (anchor benchmark is fixed)
+    free = bench_idx != anchor_idx
+    discrim_cols = (
+        n_models + n_benchmarks
+        + np.where(bench_idx < anchor_idx, bench_idx, bench_idx - 1)
+    )
+
+    rows = [obs_rows, obs_rows, obs_rows[free]]
+    cols = [model_idx, n_models + bench_idx, discrim_cols[free]]
+    vals = [cap_vals, diff_vals, discrim_vals[free]]
+
+    n_rows = n_obs
+    if regularization_strength > 0:
+        n_rows = n_obs + 1
+        reg_penalty = regularization_strength * (
+            np.sum(capability**2) +
+            np.sum(difficulty**2) +
+            np.sum(discriminability[discriminability != anchor_discriminability]**2)
+        ) / n_params
+
+        if reg_penalty > 0:
+            scale = regularization_strength / (n_params * np.sqrt(reg_penalty))
+            free_bench = np.flatnonzero(np.arange(n_benchmarks) != anchor_idx)
+            free_bench_cols = (
+                n_models + n_benchmarks
+                + np.where(free_bench < anchor_idx, free_bench, free_bench - 1)
+            )
+            reg_cols = np.concatenate([
+                np.arange(n_models),
+                n_models + np.arange(n_benchmarks),
+                free_bench_cols,
+            ])
+            reg_vals = np.concatenate([
+                scale * capability,
+                scale * difficulty,
+                scale * discriminability[free_bench],
+            ])
+            rows.append(np.full(reg_cols.size, n_obs))
+            cols.append(reg_cols)
+            vals.append(reg_vals)
+
+    jac = coo_matrix(
+        (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(n_rows, n_params),
+    )
+    return jac.tocsr()
+
+
+def _capability_jacobian(
+    capability: np.ndarray,
+    model_idx: np.ndarray,
+    difficulty: np.ndarray,
+    discriminability: np.ndarray,
+    n_models: int,
+    regularization_strength: float,
+):
+    """Sparse Jacobian for the capabilities-only fit (benchmark params fixed)."""
+    n_obs = len(model_idx)
+    z = discriminability * (capability[model_idx] - difficulty)
+    s = 1.0 / (1.0 + np.exp(-np.clip(z, -500, 500)))
+    ds = s * (1 - s)
+
+    rows = [np.arange(n_obs)]
+    cols = [model_idx]
+    vals = [ds * discriminability]
+
+    n_rows = n_obs
+    if regularization_strength > 0:
+        n_rows = n_obs + 1
+        reg_penalty = regularization_strength * np.sum(capability**2) / n_models
+        if reg_penalty > 0:
+            scale = regularization_strength / (n_models * np.sqrt(reg_penalty))
+            rows.append(np.full(n_models, n_obs))
+            cols.append(np.arange(n_models))
+            vals.append(scale * capability)
+
+    jac = coo_matrix(
+        (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(n_rows, n_models),
+    )
+    return jac.tocsr()
 
 
 def load_benchmark_data(url: str = "https://epoch.ai/data/eci_benchmarks.csv") -> pd.DataFrame:
@@ -59,8 +209,9 @@ def fit_eci_model(
     anchor_discriminability: float = DEFAULT_ANCHOR_DISCRIMINABILITY,
     regularization_strength: float = 0.1,
     performance_clip_eps: float = 1e-3,
-    bootstrap_samples: int = 100,
+    bootstrap_samples: int = 500,
     bootstrap_seed: int = 12345,
+    bootstrap_method: str = "hierarchical",
     ci_level: float = 0.90,
     use_analytical_jacobian: bool = True,
     return_bootstrap_samples: bool = False,
@@ -83,6 +234,13 @@ def fit_eci_model(
         performance_clip_eps: Clip performance to [eps, 1-eps] to avoid degeneracy.
         bootstrap_samples: Number of bootstrap resamples for confidence intervals.
         bootstrap_seed: Random seed for reproducibility.
+        bootstrap_method: Resampling scheme for confidence intervals:
+            - "hierarchical" (default): hold the set of models fixed and
+              resample each model's benchmark results with replacement, so
+              every model keeps its observation count in every resample.
+            - "observation": resample all (model, benchmark) observations with
+              replacement from the pooled data. A model can lose all of its
+              observations in a resample.
         ci_level: Confidence interval level (e.g., 0.90 for 90% CI).
         use_analytical_jacobian: If True, use analytical Jacobian for faster optimization.
             If False, use numerical differentiation (slower but may give slightly
@@ -102,6 +260,7 @@ def fit_eci_model(
     df = df.copy()
 
     # Validate inputs
+    _validate_bootstrap_method(bootstrap_method)
     if df["performance"].isna().any():
         raise ValueError("Performance data contains NaN values")
     if (df["performance"] < 0).any() or (df["performance"] > 1).any():
@@ -172,66 +331,16 @@ def fit_eci_model(
 
         return resid
 
-    def jacobian(params: np.ndarray) -> np.ndarray:
+    def jacobian(params: np.ndarray):
         """Analytical Jacobian for faster optimization."""
         capability, difficulty, discriminability = unpack_params(params)
-
-        # Compute predictions and sigmoid derivative
-        z = discriminability[bench_idx] * (capability[model_idx] - difficulty[bench_idx])
-        s = sigmoid(z)
-        ds = s * (1 - s)  # sigmoid'(z)
-
-        # Number of rows: n_obs + 1 (for regularization)
-        n_rows = n_obs + 1 if regularization_strength > 0 else n_obs
-        jac = lil_matrix((n_rows, n_params))
-
-        # Derivatives w.r.t. capability
-        # d(resid_i)/d(cap_m) = ds[i] * discrim[b] for obs where model_idx[i] == m
-        cap_derivs = ds * discriminability[bench_idx]
-        for i in range(n_obs):
-            jac[i, model_idx[i]] = cap_derivs[i]
-
-        # Derivatives w.r.t. difficulty
-        # d(resid_i)/d(diff_b) = -ds[i] * discrim[b] for obs where bench_idx[i] == b
-        diff_derivs = -ds * discriminability[bench_idx]
-        for i in range(n_obs):
-            jac[i, n_models + bench_idx[i]] = diff_derivs[i]
-
-        # Derivatives w.r.t. discriminability (free parameters only)
-        # d(resid_i)/d(discrim_b) = ds[i] * (cap[m] - diff[b])
-        discrim_derivs = ds * (capability[model_idx] - difficulty[bench_idx])
-        for i in range(n_obs):
-            b = bench_idx[i]
-            if b == anchor_idx:
-                continue  # anchor discriminability is fixed
-            # Map benchmark index to parameter index
-            param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
-            jac[i, param_idx] = discrim_derivs[i]
-
-        # Regularization term derivatives
-        if regularization_strength > 0:
-            reg_penalty = regularization_strength * (
-                np.sum(capability**2) +
-                np.sum(difficulty**2) +
-                np.sum(discriminability[discriminability != anchor_discriminability]**2)
-            ) / n_params
-
-            if reg_penalty > 0:
-                scale = regularization_strength / (n_params * np.sqrt(reg_penalty))
-                # d/d(cap_m) of sqrt(reg) = scale * cap_m
-                for m in range(n_models):
-                    jac[n_obs, m] = scale * capability[m]
-                # d/d(diff_b) of sqrt(reg) = scale * diff_b
-                for b in range(n_benchmarks):
-                    jac[n_obs, n_models + b] = scale * difficulty[b]
-                # d/d(discrim_b) of sqrt(reg) = scale * discrim_b (free only)
-                for b in range(n_benchmarks):
-                    if b == anchor_idx:
-                        continue
-                    param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
-                    jac[n_obs, param_idx] = scale * discriminability[b]
-
-        return jac.tocsr()
+        return _irt_jacobian(
+            capability, difficulty, discriminability,
+            model_idx, bench_idx,
+            anchor_idx, anchor_discriminability,
+            n_models, n_benchmarks, n_params,
+            regularization_strength,
+        )
 
     # Initial values
     np.random.seed(42)
@@ -288,13 +397,17 @@ def fit_eci_model(
     if bootstrap_samples > 0:
         rng = np.random.default_rng(bootstrap_seed)
 
+        rows_by_model = None
+        if bootstrap_method == "hierarchical":
+            rows_by_model = [np.flatnonzero(model_idx == m) for m in range(n_models)]
+
         for _ in tqdm(range(bootstrap_samples), desc="Bootstrap", unit="sample"):
-            # Resample with replacement
-            idx = rng.integers(0, len(performance), size=len(performance))
+            idx = _bootstrap_indices(
+                rng, bootstrap_method, len(performance), rows_by_model
+            )
             boot_performance = performance[idx]
             boot_model_idx = model_idx[idx]
             boot_bench_idx = bench_idx[idx]
-            boot_n_obs = len(boot_performance)
 
             def boot_residuals(params):
                 cap, diff, disc = unpack_params(params)
@@ -310,41 +423,13 @@ def fit_eci_model(
 
             def boot_jacobian(params):
                 cap, diff, disc = unpack_params(params)
-                z = disc[boot_bench_idx] * (cap[boot_model_idx] - diff[boot_bench_idx])
-                s = sigmoid(z)
-                ds = s * (1 - s)
-
-                n_rows = boot_n_obs + 1 if regularization_strength > 0 else boot_n_obs
-                jac = lil_matrix((n_rows, n_params))
-
-                cap_derivs = ds * disc[boot_bench_idx]
-                diff_derivs = -ds * disc[boot_bench_idx]
-                discrim_derivs = ds * (cap[boot_model_idx] - diff[boot_bench_idx])
-
-                for i in range(boot_n_obs):
-                    jac[i, boot_model_idx[i]] = cap_derivs[i]
-                    jac[i, n_models + boot_bench_idx[i]] = diff_derivs[i]
-                    b = boot_bench_idx[i]
-                    if b != anchor_idx:
-                        param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
-                        jac[i, param_idx] = discrim_derivs[i]
-
-                if regularization_strength > 0:
-                    reg = regularization_strength * (
-                        np.sum(cap**2) + np.sum(diff**2) +
-                        np.sum(disc[disc != anchor_discriminability]**2)
-                    ) / n_params
-                    if reg > 0:
-                        scale = regularization_strength / (n_params * np.sqrt(reg))
-                        for m in range(n_models):
-                            jac[boot_n_obs, m] = scale * cap[m]
-                        for b in range(n_benchmarks):
-                            jac[boot_n_obs, n_models + b] = scale * diff[b]
-                            if b != anchor_idx:
-                                param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
-                                jac[boot_n_obs, param_idx] = scale * disc[b]
-
-                return jac.tocsr()
+                return _irt_jacobian(
+                    cap, diff, disc,
+                    boot_model_idx, boot_bench_idx,
+                    anchor_idx, anchor_discriminability,
+                    n_models, n_benchmarks, n_params,
+                    regularization_strength,
+                )
 
             try:
                 boot_result = least_squares(
@@ -440,9 +525,11 @@ def fit_capabilities_given_benchmarks(
     bench_df: pd.DataFrame,
     regularization_strength: float = 0.1,
     performance_clip_eps: float = 1e-3,
-    bootstrap_samples: int = 100,
+    bootstrap_samples: int = 500,
     bootstrap_seed: int = 12345,
+    bootstrap_method: str = "hierarchical",
     ci_level: float = 0.90,
+    use_analytical_jacobian: bool = True,
 ) -> pd.DataFrame:
     """
     Fit model capabilities while holding benchmark parameters fixed.
@@ -460,7 +547,12 @@ def fit_capabilities_given_benchmarks(
         performance_clip_eps: Clip performance to [eps, 1-eps] to avoid degeneracy.
         bootstrap_samples: Number of bootstrap resamples for confidence intervals.
         bootstrap_seed: Random seed for reproducibility.
+        bootstrap_method: Resampling scheme for confidence intervals;
+            see fit_eci_model for the available options.
         ci_level: Confidence interval level (e.g., 0.90 for 90% CI).
+        use_analytical_jacobian: If True, use analytical Jacobian for faster
+            optimization. If False, use numerical differentiation (slower,
+            reproduces the original behavior of this function exactly).
 
     Returns:
         DataFrame with model capabilities and confidence intervals.
@@ -468,6 +560,7 @@ def fit_capabilities_given_benchmarks(
     df = df.copy()
 
     # Validate inputs
+    _validate_bootstrap_method(bootstrap_method)
     if df["performance"].isna().any():
         raise ValueError("Performance data contains NaN values")
     if (df["performance"] < 0).any() or (df["performance"] > 1).any():
@@ -518,6 +611,12 @@ def fit_capabilities_given_benchmarks(
 
         return resid
 
+    def jacobian(capability: np.ndarray):
+        return _capability_jacobian(
+            capability, model_idx, difficulty, discriminability,
+            n_models, regularization_strength,
+        )
+
     # Initial values
     np.random.seed(42)
     init_capability = np.random.randn(n_models) * 0.1
@@ -530,6 +629,7 @@ def fit_capabilities_given_benchmarks(
     result = least_squares(
         residuals,
         init_capability,
+        jac=jacobian if use_analytical_jacobian else "2-point",
         bounds=(lower, upper),
         method="trf",
         verbose=0
@@ -549,8 +649,14 @@ def fit_capabilities_given_benchmarks(
         rng = np.random.default_rng(bootstrap_seed)
         capability_samples = []
 
+        rows_by_model = None
+        if bootstrap_method == "hierarchical":
+            rows_by_model = [np.flatnonzero(model_idx == m) for m in range(n_models)]
+
         for _ in tqdm(range(bootstrap_samples), desc="Bootstrap", unit="sample"):
-            idx = rng.integers(0, len(performance), size=len(performance))
+            idx = _bootstrap_indices(
+                rng, bootstrap_method, len(performance), rows_by_model
+            )
             boot_performance = performance[idx]
             boot_model_idx = model_idx[idx]
             boot_difficulty = difficulty[idx]
@@ -564,10 +670,17 @@ def fit_capabilities_given_benchmarks(
                     resid = np.append(resid, np.sqrt(reg))
                 return resid
 
+            def boot_jacobian(cap):
+                return _capability_jacobian(
+                    cap, boot_model_idx, boot_difficulty, boot_discriminability,
+                    n_models, regularization_strength,
+                )
+
             try:
                 boot_result = least_squares(
                     boot_residuals,
                     result.x.copy(),
+                    jac=boot_jacobian if use_analytical_jacobian else "2-point",
                     bounds=(lower, upper),
                     method="trf",
                     verbose=0
