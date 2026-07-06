@@ -7,11 +7,18 @@ and verify that the fitted scores match:
 - https://epoch.ai/data/edi_scores.csv (benchmark difficulties)
 """
 
+import numpy as np
 import pandas as pd
 import pytest
 from scipy.stats import spearmanr
 
-from eci import fit_eci_model, load_benchmark_data, compute_eci_scores
+from eci import fit_eci_model, load_benchmark_data, compute_eci_scores, BOOTSTRAP_METHODS
+from eci.fitting import (
+    _bootstrap_indices,
+    _capability_jacobian,
+    _irt_jacobian,
+    fit_capabilities_given_benchmarks,
+)
 
 
 # URLs for test data
@@ -249,6 +256,230 @@ class TestEDIScoreAccuracy:
         print(f"\nEDI Spearman correlation: {corr:.6f} (p={p_value:.2e})")
 
         assert corr > 0.99, f"Ranking correlation {corr:.6f} is too low"
+
+
+def _synthetic_benchmark_data(seed: int = 0) -> pd.DataFrame:
+    """Small dataset generated from the IRT model itself (runs offline)."""
+    rng = np.random.default_rng(seed)
+    n_models, n_benchmarks = 12, 8
+    capabilities = np.linspace(-1.5, 1.5, n_models)
+    difficulties = np.linspace(-1.0, 1.0, n_benchmarks)
+    discriminabilities = rng.uniform(0.8, 1.5, n_benchmarks)
+
+    rows = []
+    for m in range(n_models):
+        # First few models get minimal coverage (4 benchmarks, like the
+        # least-covered real models); all models include the anchor benchmark
+        if m < 3:
+            benches = np.concatenate(
+                [[0], rng.choice(np.arange(1, n_benchmarks), size=3, replace=False)]
+            )
+        else:
+            benches = np.arange(n_benchmarks)
+        for b in benches:
+            p = 1.0 / (1.0 + np.exp(-discriminabilities[b] * (capabilities[m] - difficulties[b])))
+            p = float(np.clip(p + rng.normal(0, 0.03), 0.001, 0.999))
+            rows.append({
+                "model_id": f"model_{m}",
+                "benchmark_id": f"bench_{b}",
+                "performance": p,
+                "benchmark": "Winogrande" if b == 0 else f"bench_{b}",
+                "Model": f"Model {m}",
+            })
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture(scope="module")
+def synthetic_data():
+    return _synthetic_benchmark_data()
+
+
+class TestBootstrapMethods:
+    """Offline tests for the bootstrap resampling schemes."""
+
+    def test_invalid_method_raises(self, synthetic_data):
+        with pytest.raises(ValueError, match="bootstrap_method"):
+            fit_eci_model(
+                synthetic_data, bootstrap_samples=1, bootstrap_method="jackknife"
+            )
+
+    @pytest.mark.parametrize("method", BOOTSTRAP_METHODS)
+    def test_method_produces_valid_cis(self, synthetic_data, method):
+        model_df, bench_df = fit_eci_model(
+            synthetic_data, bootstrap_samples=8, bootstrap_method=method
+        )
+        assert np.isfinite(model_df["capability_ci_low"]).all()
+        assert np.isfinite(model_df["capability_ci_high"]).all()
+        assert (model_df["capability_ci_low"] <= model_df["capability_ci_high"]).all()
+        assert (model_df["capability_se"] > 0).all()
+
+    @pytest.mark.parametrize("method", BOOTSTRAP_METHODS)
+    def test_method_reproducible_with_seed(self, synthetic_data, method):
+        def run():
+            return fit_eci_model(
+                synthetic_data, bootstrap_samples=4, bootstrap_method=method
+            )[0]
+
+        pd.testing.assert_frame_equal(run(), run())
+
+    def test_hierarchical_resampling_covers_every_model(self):
+        rng = np.random.default_rng(0)
+        model_idx = np.repeat(np.arange(10), 4)
+        rows_by_model = [np.flatnonzero(model_idx == m) for m in range(10)]
+        for _ in range(200):
+            idx = _bootstrap_indices(rng, "hierarchical", model_idx.size, rows_by_model)
+            assert idx.size == model_idx.size
+            assert set(model_idx[idx]) == set(range(10))
+            # Each model's rows are resampled only from its own rows
+            assert (model_idx[np.sort(idx)] == model_idx).all()
+
+    def test_methods_give_different_cis(self, synthetic_data):
+        cis = {}
+        for method in ("observation", "hierarchical"):
+            model_df, _ = fit_eci_model(
+                synthetic_data, bootstrap_samples=6, bootstrap_method=method
+            )
+            cis[method] = model_df.sort_values("model_id")["capability_ci_high"].to_numpy()
+        assert not np.allclose(cis["observation"], cis["hierarchical"])
+
+
+def _irt_jacobian_loop_reference(
+    capability, difficulty, discriminability, model_idx, bench_idx,
+    anchor_idx, anchor_discriminability, n_models, n_benchmarks, n_params,
+    regularization_strength,
+):
+    """Original loop-based Jacobian assembly, kept as the verification reference."""
+    from scipy.sparse import lil_matrix
+
+    def sigmoid(x):
+        return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
+
+    n_obs = len(model_idx)
+    z = discriminability[bench_idx] * (capability[model_idx] - difficulty[bench_idx])
+    s = sigmoid(z)
+    ds = s * (1 - s)
+
+    n_rows = n_obs + 1 if regularization_strength > 0 else n_obs
+    jac = lil_matrix((n_rows, n_params))
+
+    cap_derivs = ds * discriminability[bench_idx]
+    diff_derivs = -ds * discriminability[bench_idx]
+    discrim_derivs = ds * (capability[model_idx] - difficulty[bench_idx])
+
+    for i in range(n_obs):
+        jac[i, model_idx[i]] = cap_derivs[i]
+        jac[i, n_models + bench_idx[i]] = diff_derivs[i]
+        b = bench_idx[i]
+        if b != anchor_idx:
+            param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
+            jac[i, param_idx] = discrim_derivs[i]
+
+    if regularization_strength > 0:
+        reg = regularization_strength * (
+            np.sum(capability**2) + np.sum(difficulty**2) +
+            np.sum(discriminability[discriminability != anchor_discriminability]**2)
+        ) / n_params
+        if reg > 0:
+            scale = regularization_strength / (n_params * np.sqrt(reg))
+            for m in range(n_models):
+                jac[n_obs, m] = scale * capability[m]
+            for b in range(n_benchmarks):
+                jac[n_obs, n_models + b] = scale * difficulty[b]
+                if b != anchor_idx:
+                    param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
+                    jac[n_obs, param_idx] = scale * discriminability[b]
+
+    return jac.tocsr()
+
+
+class TestJacobians:
+    """Verify the vectorized Jacobian assembly against loop/numerical references."""
+
+    def _random_problem(self, seed=0, n_models=9, n_benchmarks=6, n_obs=60):
+        rng = np.random.default_rng(seed)
+        model_idx = rng.integers(0, n_models, size=n_obs)
+        bench_idx = rng.integers(0, n_benchmarks, size=n_obs)
+        # Ensure every model and benchmark appears at least once
+        model_idx[:n_models] = np.arange(n_models)
+        bench_idx[:n_benchmarks] = np.arange(n_benchmarks)
+        capability = rng.normal(0, 1.5, n_models)
+        difficulty = rng.normal(0, 1.0, n_benchmarks)
+        discriminability = rng.uniform(0.5, 2.0, n_benchmarks)
+        return model_idx, bench_idx, capability, difficulty, discriminability
+
+    @pytest.mark.parametrize("regularization", [0.0, 0.1])
+    @pytest.mark.parametrize("anchor_idx", [0, 3, 5])
+    def test_irt_jacobian_matches_loop_reference(self, regularization, anchor_idx):
+        model_idx, bench_idx, capability, difficulty, discriminability = self._random_problem()
+        n_models, n_benchmarks = len(capability), len(difficulty)
+        n_params = n_models + n_benchmarks + (n_benchmarks - 1)
+        anchor_discriminability = 1.0
+        discriminability[anchor_idx] = anchor_discriminability
+
+        args = (
+            capability, difficulty, discriminability, model_idx, bench_idx,
+            anchor_idx, anchor_discriminability, n_models, n_benchmarks,
+            n_params, regularization,
+        )
+        vectorized = _irt_jacobian(*args).toarray()
+        reference = _irt_jacobian_loop_reference(*args).toarray()
+
+        assert vectorized.shape == reference.shape
+        np.testing.assert_array_equal(vectorized, reference)
+
+    @pytest.mark.parametrize("regularization", [0.0, 0.1])
+    def test_capability_jacobian_matches_numerical(self, regularization):
+        model_idx, _, capability, _, _ = self._random_problem()
+        n_models = len(capability)
+        n_obs = len(model_idx)
+        rng = np.random.default_rng(1)
+        difficulty = rng.normal(0, 1.0, n_obs)
+        discriminability = rng.uniform(0.5, 2.0, n_obs)
+
+        def residuals(cap):
+            pred = 1.0 / (1.0 + np.exp(-discriminability * (cap[model_idx] - difficulty)))
+            resid = pred - 0.5
+            if regularization > 0:
+                resid = np.append(
+                    resid, np.sqrt(regularization * np.sum(cap**2) / n_models)
+                )
+            return resid
+
+        analytical = _capability_jacobian(
+            capability, model_idx, difficulty, discriminability,
+            n_models, regularization,
+        ).toarray()
+
+        eps = 1e-7
+        numerical = np.empty_like(analytical)
+        for m in range(n_models):
+            bumped = capability.copy()
+            bumped[m] += eps
+            numerical[:, m] = (residuals(bumped) - residuals(capability)) / eps
+
+        np.testing.assert_allclose(analytical, numerical, atol=1e-5)
+
+    def test_fit_capabilities_analytical_matches_numerical(self, synthetic_data):
+        bench_df = pd.DataFrame({
+            "benchmark": sorted(synthetic_data["benchmark"].unique()),
+        })
+        rng = np.random.default_rng(2)
+        bench_df["difficulty"] = rng.normal(0, 1.0, len(bench_df))
+        bench_df["discriminability"] = rng.uniform(0.8, 1.5, len(bench_df))
+
+        kwargs = dict(bootstrap_samples=0)
+        fast = fit_capabilities_given_benchmarks(
+            synthetic_data, bench_df, use_analytical_jacobian=True, **kwargs
+        )
+        slow = fit_capabilities_given_benchmarks(
+            synthetic_data, bench_df, use_analytical_jacobian=False, **kwargs
+        )
+        merged = fast.merge(slow, on="model_id", suffixes=("_fast", "_slow"))
+        # Exact vs finite-difference Jacobians converge along slightly
+        # different optimizer paths; agreement is to ~1e-5, not machine eps
+        np.testing.assert_allclose(
+            merged["capability_fast"], merged["capability_slow"], atol=1e-4
+        )
 
 
 class TestOptionalReturns:
