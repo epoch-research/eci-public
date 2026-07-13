@@ -12,6 +12,12 @@ where:
 - capability (C): How capable a model is (higher = more capable)
 - difficulty (D): How hard a benchmark is (higher = harder)
 - discriminability (α): How sharply performance transitions (higher = sharper)
+
+Everything in this module lives on the RAW scale, identified by the anchor
+benchmark below. Conversion to the public ECI/EDI scale - including all
+confidence-interval construction - lives in scaling.py; this module
+deliberately exposes bootstrap draws rather than CIs, so that CIs can only
+be built with the correct per-draw re-anchoring.
 """
 
 import numpy as np
@@ -20,12 +26,6 @@ from scipy.optimize import least_squares
 from scipy.sparse import coo_matrix
 from tqdm import tqdm
 
-
-# Default scaling anchors - these define the ECI scale
-DEFAULT_ANCHOR_MODEL_LOW = "Claude 3.5 Sonnet"
-DEFAULT_ANCHOR_ECI_LOW = 130.0
-DEFAULT_ANCHOR_MODEL_HIGH = "GPT-5"
-DEFAULT_ANCHOR_ECI_HIGH = 150.0
 
 # Default benchmark anchor for model identification
 DEFAULT_ANCHOR_BENCHMARK = "Winogrande"
@@ -212,10 +212,8 @@ def fit_eci_model(
     bootstrap_samples: int = 500,
     bootstrap_seed: int = 12345,
     bootstrap_method: str = "hierarchical",
-    ci_level: float = 0.90,
     use_analytical_jacobian: bool = True,
-    return_bootstrap_samples: bool = False,
-) -> tuple[pd.DataFrame, pd.DataFrame] | tuple[pd.DataFrame, pd.DataFrame, dict]:
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Fit the IRT model to estimate model capabilities and benchmark difficulties.
 
@@ -225,6 +223,11 @@ def fit_eci_model(
     To identify the model (avoid infinite solutions), we anchor one benchmark's
     difficulty and discriminability to fixed values.
 
+    All outputs are on the raw scale and contain point estimates plus raw
+    bootstrap draws - no confidence intervals. CIs are only meaningful on
+    the ECI scale, with each draw re-anchored individually; pass the returned
+    bootstrap_data to scaling.compute_eci_scores to construct them.
+
     Args:
         df: DataFrame with columns model_id, benchmark_id, performance, benchmark, Model.
         anchor_benchmark: Name of benchmark to anchor (fixes scale location).
@@ -232,30 +235,30 @@ def fit_eci_model(
         anchor_discriminability: Fixed discriminability for anchor benchmark.
         regularization_strength: L2 regularization to prevent extreme values (0-1).
         performance_clip_eps: Clip performance to [eps, 1-eps] to avoid degeneracy.
-        bootstrap_samples: Number of bootstrap resamples for confidence intervals.
+        bootstrap_samples: Number of bootstrap resamples to draw (0 to skip).
         bootstrap_seed: Random seed for reproducibility.
-        bootstrap_method: Resampling scheme for confidence intervals:
+        bootstrap_method: Resampling scheme for the bootstrap draws:
             - "hierarchical" (default): hold the set of models fixed and
               resample each model's benchmark results with replacement, so
               every model keeps its observation count in every resample.
             - "observation": resample all (model, benchmark) observations with
               replacement from the pooled data. A model can lose all of its
               observations in a resample.
-        ci_level: Confidence interval level (e.g., 0.90 for 90% CI).
         use_analytical_jacobian: If True, use analytical Jacobian for faster optimization.
             If False, use numerical differentiation (slower but may give slightly
             different results due to optimizer path differences).
-        return_bootstrap_samples: If True, additionally return a dict with the raw
-            bootstrap draws (capability, difficulty, discriminability) so callers
-            can build downstream artifacts (e.g. per-sample CIs in viz code).
 
     Returns:
-        Tuple of (model_capabilities_df, benchmark_params_df) by default.
-        If return_bootstrap_samples is True, returns a third element: a dict
-        with keys 'model_ids', 'model_names', 'benchmark_ids', 'benchmark_names',
-        'capability_samples', 'difficulty_samples', 'discriminability_samples'.
-        Each *_samples value is a list of length up to bootstrap_samples
-        containing 1-D numpy arrays.
+        Tuple of (model_df, bench_df, bootstrap_data):
+        - model_df: model_id, Model, capability (sorted by capability desc).
+        - bench_df: benchmark_id, benchmark, difficulty, discriminability,
+          is_anchor (sorted by difficulty).
+        - bootstrap_data: dict with keys 'model_ids', 'model_names',
+          'benchmark_ids', 'benchmark_names', 'capability_samples',
+          'difficulty_samples', 'discriminability_samples'. Each *_samples
+          value is a list of up to bootstrap_samples 1-D numpy arrays
+          (draws that fail to converge are skipped); empty lists when
+          bootstrap_samples=0.
     """
     df = df.copy()
 
@@ -382,14 +385,7 @@ def fit_eci_model(
     capability_hat = capability_hat - shift
     difficulty_hat = difficulty_hat - shift
 
-    # Bootstrap for confidence intervals
-    se_capability = np.full(n_models, np.nan)
-    se_difficulty = np.full(n_benchmarks, np.nan)
-    ci_capability_low = np.full(n_models, np.nan)
-    ci_capability_high = np.full(n_models, np.nan)
-    ci_difficulty_low = np.full(n_benchmarks, np.nan)
-    ci_difficulty_high = np.full(n_benchmarks, np.nan)
-
+    # Bootstrap draws (raw scale; CI construction happens in scaling.py)
     capability_samples: list[np.ndarray] = []
     difficulty_samples: list[np.ndarray] = []
     discriminability_samples: list[np.ndarray] = []
@@ -449,44 +445,14 @@ def fit_eci_model(
             except Exception:
                 continue
 
-        if len(capability_samples) > 1:
-            cap_arr = np.vstack(capability_samples)
-            diff_arr = np.vstack(difficulty_samples)
-
-            se_capability = np.std(cap_arr, axis=0, ddof=1)
-            se_difficulty = np.std(diff_arr, axis=0, ddof=1)
-
-            tail = (1 - ci_level) / 2
-            ci_capability_low = np.quantile(cap_arr, tail, axis=0)
-            ci_capability_high = np.quantile(cap_arr, 1 - tail, axis=0)
-            ci_difficulty_low = np.quantile(diff_arr, tail, axis=0)
-            ci_difficulty_high = np.quantile(diff_arr, 1 - tail, axis=0)
-
-    # Build output DataFrames
+    # Build output DataFrames (bare statistical results; callers join their
+    # own metadata - see scripts/ for examples)
     model_names = [id_to_model_name[m] for m in model_ids]
     model_df = pd.DataFrame({
         "model_id": model_ids,
         "Model": model_names,
         "capability": capability_hat,
-        "capability_se": se_capability,
-        "capability_ci_low": ci_capability_low,
-        "capability_ci_high": ci_capability_high,
-    })
-
-    # Preserve model metadata columns from input (date, Organization, model_version, etc.)
-    # Group by model_id and take the first value for each metadata column
-    metadata_cols = [c for c in df.columns if c not in [
-        "model_id", "benchmark_id", "performance", "benchmark", "Model",
-        "benchmark_release_date", "optimized", "is_math", "is_coding",
-        "random_baseline", "model"
-    ]]
-    if metadata_cols:
-        model_metadata = df.drop_duplicates("model_id").set_index("model_id")[metadata_cols]
-        for col in metadata_cols:
-            if col in model_metadata.columns:
-                model_df[col] = model_df["model_id"].map(model_metadata[col].to_dict())
-
-    model_df = model_df.sort_values("capability", ascending=False)
+    }).sort_values("capability", ascending=False)
 
     bench_names = [id_to_bench_name[b] for b in benchmark_ids]
     bench_df = pd.DataFrame({
@@ -494,30 +460,19 @@ def fit_eci_model(
         "benchmark": bench_names,
         "difficulty": difficulty_hat,
         "discriminability": discriminability_hat,
-        "difficulty_se": se_difficulty,
-        "difficulty_ci_low": ci_difficulty_low,
-        "difficulty_ci_high": ci_difficulty_high,
         "is_anchor": [b == anchor_bench_id for b in benchmark_ids],
     }).sort_values("difficulty")
 
-    # Add benchmark release dates if available
-    if "benchmark_release_date" in df.columns:
-        date_map = df.drop_duplicates("benchmark_id").set_index("benchmark_id")["benchmark_release_date"].to_dict()
-        bench_df["benchmark_release_date"] = bench_df["benchmark_id"].map(date_map)
-
-    if return_bootstrap_samples:
-        bootstrap_data = {
-            "model_ids": list(model_ids),
-            "model_names": model_names,
-            "benchmark_ids": list(benchmark_ids),
-            "benchmark_names": bench_names,
-            "capability_samples": capability_samples,
-            "difficulty_samples": difficulty_samples,
-            "discriminability_samples": discriminability_samples,
-        }
-        return model_df, bench_df, bootstrap_data
-
-    return model_df, bench_df
+    bootstrap_data = {
+        "model_ids": list(model_ids),
+        "model_names": model_names,
+        "benchmark_ids": list(benchmark_ids),
+        "benchmark_names": bench_names,
+        "capability_samples": capability_samples,
+        "difficulty_samples": difficulty_samples,
+        "discriminability_samples": discriminability_samples,
+    }
+    return model_df, bench_df, bootstrap_data
 
 
 def fit_capabilities_given_benchmarks(
@@ -724,88 +679,3 @@ def fit_capabilities_given_benchmarks(
 
     return model_df
 
-
-def compute_eci_scores(
-    model_df: pd.DataFrame,
-    bench_df: pd.DataFrame,
-    anchor_model_low: str = DEFAULT_ANCHOR_MODEL_LOW,
-    anchor_eci_low: float = DEFAULT_ANCHOR_ECI_LOW,
-    anchor_model_high: str = DEFAULT_ANCHOR_MODEL_HIGH,
-    anchor_eci_high: float = DEFAULT_ANCHOR_ECI_HIGH,
-    return_scaling: bool = False,
-) -> tuple[pd.DataFrame, pd.DataFrame] | tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """
-    Convert raw capabilities and difficulties to ECI/EDI scale.
-
-    The ECI scale is defined by two anchor points:
-    - anchor_model_low is assigned anchor_eci_low (default: Claude 3.5 Sonnet = 130)
-    - anchor_model_high is assigned anchor_eci_high (default: GPT-5 = 150)
-
-    All other scores are linearly interpolated/extrapolated.
-
-    Args:
-        model_df: DataFrame with 'Model' and 'capability' columns from fit_eci_model.
-        bench_df: DataFrame with 'difficulty' columns from fit_eci_model.
-        anchor_model_low: Name of model for lower anchor point.
-        anchor_eci_low: ECI value for lower anchor.
-        anchor_model_high: Name of model for upper anchor point.
-        anchor_eci_high: ECI value for upper anchor.
-        return_scaling: If True, additionally return the linear scaling
-            coefficients (eci = a + b * capability) along with the anchor
-            metadata, so callers can persist/replay the exact transform.
-
-    Returns:
-        Tuple of (eci_df, edi_df) by default. If return_scaling is True,
-        returns a third element: a dict with keys 'a', 'b',
-        'scaling_anchor1', 'scaling_anchor1_eci', 'scaling_anchor2',
-        'scaling_anchor2_eci'.
-    """
-    # Find anchor capabilities
-    low_cap = model_df.loc[model_df["Model"] == anchor_model_low, "capability"]
-    high_cap = model_df.loc[model_df["Model"] == anchor_model_high, "capability"]
-
-    if low_cap.empty:
-        raise ValueError(f"Anchor model '{anchor_model_low}' not found")
-    if high_cap.empty:
-        raise ValueError(f"Anchor model '{anchor_model_high}' not found")
-
-    cap_low = low_cap.iloc[0]
-    cap_high = high_cap.iloc[0]
-
-    # Compute linear scaling: eci = a + b * capability
-    b = (anchor_eci_high - anchor_eci_low) / (cap_high - cap_low)
-    a = anchor_eci_low - b * cap_low
-
-    # Apply scaling to model capabilities
-    eci_df = model_df.copy()
-    eci_df["eci"] = a + b * eci_df["capability"]
-
-    # Scale confidence intervals if present
-    if "capability_ci_low" in eci_df.columns:
-        eci_df["eci_ci_low"] = a + b * eci_df["capability_ci_low"]
-        eci_df["eci_ci_high"] = a + b * eci_df["capability_ci_high"]
-
-    # Apply same scaling to benchmark difficulties (EDI)
-    edi_df = bench_df.copy()
-    edi_df["edi"] = a + b * edi_df["difficulty"]
-
-    # Scale discriminability to match ECI scale
-    edi_df["discriminability_scaled"] = edi_df["discriminability"] / b
-
-    # Scale confidence intervals if present
-    if "difficulty_ci_low" in edi_df.columns:
-        edi_df["edi_ci_low"] = a + b * edi_df["difficulty_ci_low"]
-        edi_df["edi_ci_high"] = a + b * edi_df["difficulty_ci_high"]
-
-    if return_scaling:
-        scaling = {
-            "a": float(a),
-            "b": float(b),
-            "scaling_anchor1": anchor_model_low,
-            "scaling_anchor1_eci": float(anchor_eci_low),
-            "scaling_anchor2": anchor_model_high,
-            "scaling_anchor2_eci": float(anchor_eci_high),
-        }
-        return eci_df, edi_df, scaling
-
-    return eci_df, edi_df

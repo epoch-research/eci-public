@@ -40,12 +40,12 @@ def benchmark_data():
 @pytest.fixture(scope="module")
 def fitted_model(benchmark_data):
     """Fit the ECI model on benchmark data (no bootstrap for speed)."""
-    model_df, bench_df = fit_eci_model(
+    model_df, bench_df, _ = fit_eci_model(
         benchmark_data,
         bootstrap_samples=0,
     )
-    eci_df, edi_df = compute_eci_scores(model_df, bench_df)
-    return eci_df, edi_df
+    results = compute_eci_scores(model_df, bench_df)
+    return results.eci_df, results.edi_df
 
 
 @pytest.fixture(scope="module")
@@ -294,6 +294,17 @@ def synthetic_data():
     return _synthetic_benchmark_data()
 
 
+# Anchor models used when scaling synthetic fits (well-separated capabilities)
+SYNTH_ANCHORS = dict(anchor_model_low="Model 2", anchor_model_high="Model 9")
+
+
+def _scaled_synthetic_results(synthetic_data, bootstrap_samples, method="hierarchical"):
+    model_df, bench_df, bootstrap_data = fit_eci_model(
+        synthetic_data, bootstrap_samples=bootstrap_samples, bootstrap_method=method
+    )
+    return compute_eci_scores(model_df, bench_df, bootstrap_data, **SYNTH_ANCHORS)
+
+
 class TestBootstrapMethods:
     """Offline tests for the bootstrap resampling schemes."""
 
@@ -305,13 +316,14 @@ class TestBootstrapMethods:
 
     @pytest.mark.parametrize("method", BOOTSTRAP_METHODS)
     def test_method_produces_valid_cis(self, synthetic_data, method):
-        model_df, bench_df = fit_eci_model(
-            synthetic_data, bootstrap_samples=8, bootstrap_method=method
-        )
-        assert np.isfinite(model_df["capability_ci_low"]).all()
-        assert np.isfinite(model_df["capability_ci_high"]).all()
-        assert (model_df["capability_ci_low"] <= model_df["capability_ci_high"]).all()
-        assert (model_df["capability_se"] > 0).all()
+        results = _scaled_synthetic_results(synthetic_data, 8, method)
+        eci_df = results.eci_df
+        anchors = eci_df["Model"].isin(SYNTH_ANCHORS.values())
+        non_anchor = eci_df[~anchors]
+        assert np.isfinite(non_anchor["eci_ci_low"]).all()
+        assert np.isfinite(non_anchor["eci_ci_high"]).all()
+        assert (non_anchor["eci_ci_low"] <= non_anchor["eci_ci_high"]).all()
+        assert eci_df.loc[anchors, ["eci_ci_low", "eci_ci_high"]].isna().all().all()
 
     @pytest.mark.parametrize("method", BOOTSTRAP_METHODS)
     def test_method_reproducible_with_seed(self, synthetic_data, method):
@@ -336,11 +348,25 @@ class TestBootstrapMethods:
     def test_methods_give_different_cis(self, synthetic_data):
         cis = {}
         for method in ("observation", "hierarchical"):
-            model_df, _ = fit_eci_model(
-                synthetic_data, bootstrap_samples=6, bootstrap_method=method
-            )
-            cis[method] = model_df.sort_values("model_id")["capability_ci_high"].to_numpy()
+            results = _scaled_synthetic_results(synthetic_data, 6, method)
+            eci_df = results.eci_df[~results.eci_df["Model"].isin(SYNTH_ANCHORS.values())]
+            cis[method] = eci_df.sort_values("model_id")["eci_ci_high"].to_numpy()
         assert not np.allclose(cis["observation"], cis["hierarchical"])
+
+    def test_end_to_end_anchors_pinned_in_every_draw(self, synthetic_data):
+        """Full fit -> scale integration: every scaled draw must place the
+        anchor models exactly on their fixed ECI values."""
+        results = _scaled_synthetic_results(synthetic_data, 5)
+        names = results.samples.model_names
+        idx_low = names.index(SYNTH_ANCHORS["anchor_model_low"])
+        idx_high = names.index(SYNTH_ANCHORS["anchor_model_high"])
+        assert results.samples.num_samples > 1
+        for draw in results.samples.eci_samples:
+            assert draw[idx_low] == pytest.approx(130.0, abs=1e-9)
+            assert draw[idx_high] == pytest.approx(150.0, abs=1e-9)
+        eci = results.eci_df.set_index("Model")["eci"]
+        assert eci["Model 2"] == pytest.approx(130.0, abs=1e-9)
+        assert eci["Model 9"] == pytest.approx(150.0, abs=1e-9)
 
 
 def _irt_jacobian_loop_reference(
@@ -482,14 +508,13 @@ class TestJacobians:
         )
 
 
-class TestOptionalReturns:
-    """Tests for the opt-in extra return values added for downstream callers."""
+class TestFitReturns:
+    """Tests for the fit's output contract."""
 
-    def test_return_bootstrap_samples(self, benchmark_data):
+    def test_bootstrap_data_shape(self, synthetic_data):
         model_df, bench_df, bootstrap_data = fit_eci_model(
-            benchmark_data,
+            synthetic_data,
             bootstrap_samples=3,
-            return_bootstrap_samples=True,
         )
 
         expected_keys = {
@@ -513,21 +538,36 @@ class TestOptionalReturns:
         assert diff_sample.shape == (len(bench_df),)
         assert disc_sample.shape == (len(bench_df),)
 
-    def test_return_scaling(self, benchmark_data):
-        model_df, bench_df = fit_eci_model(benchmark_data, bootstrap_samples=0)
-        eci_df, edi_df, scaling = compute_eci_scores(
-            model_df, bench_df, return_scaling=True,
+    def test_no_bootstrap_gives_empty_samples(self, synthetic_data):
+        model_df, bench_df, bootstrap_data = fit_eci_model(
+            synthetic_data, bootstrap_samples=0
         )
+        assert bootstrap_data["capability_samples"] == []
+        assert len(bootstrap_data["model_names"]) == len(model_df)
 
-        assert set(scaling.keys()) == {
-            "a", "b",
-            "scaling_anchor1", "scaling_anchor1_eci",
-            "scaling_anchor2", "scaling_anchor2_eci",
-        }
+    def test_fit_outputs_are_bare(self, synthetic_data):
+        """The fit returns statistical results only: no CI/SE columns (CIs
+        are constructed on the ECI scale in scaling.py) and no metadata
+        passthrough (callers join their own)."""
+        model_df, bench_df, _ = fit_eci_model(synthetic_data, bootstrap_samples=2)
+        assert list(model_df.columns) == ["model_id", "Model", "capability"]
+        assert list(bench_df.columns) == [
+            "benchmark_id", "benchmark", "difficulty", "discriminability", "is_anchor",
+        ]
+
+    def test_scaling_reproduces_eci_column(self, synthetic_data):
+        model_df, bench_df, _ = fit_eci_model(synthetic_data, bootstrap_samples=0)
+        results = compute_eci_scores(model_df, bench_df, **SYNTH_ANCHORS)
+
+        scaling = results.scaling
+        assert scaling["anchor_model_low"] == "Model 2"
+        assert scaling["anchor_eci_low"] == 130.0
+        assert scaling["anchor_model_high"] == "Model 9"
+        assert scaling["anchor_eci_high"] == 150.0
 
         # eci = a + b * capability should reproduce the eci column
-        recomputed = scaling["a"] + scaling["b"] * eci_df["capability"]
-        assert (recomputed - eci_df["eci"]).abs().max() < 1e-6
+        recomputed = scaling["a"] + scaling["b"] * results.eci_df["capability"]
+        assert (recomputed - results.eci_df["eci"]).abs().max() < 1e-6
 
 
 if __name__ == "__main__":

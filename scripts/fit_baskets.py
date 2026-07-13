@@ -33,10 +33,27 @@ from pathlib import Path
 import pandas as pd
 
 from eci.dataloader import prepare_benchmark_data
-from eci.fitting import fit_eci_model, compute_eci_scores, fit_capabilities_given_benchmarks
+from eci.fitting import fit_eci_model, fit_capabilities_given_benchmarks
+from eci.scaling import compute_eci_scores
 
 
 OUTPUT_DIR = Path(__file__).parent.parent / "outputs"
+
+# Input columns carried over to the ECI outputs when present (the fit itself
+# returns bare statistical results)
+MODEL_METADATA_COLS = ["date", "Organization", "model_version", "source"]
+
+
+def join_model_metadata(eci_df: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+    """Attach per-model metadata columns from the input data, first value wins."""
+    cols = [
+        c for c in MODEL_METADATA_COLS
+        if c in df.columns and c not in eci_df.columns
+    ]
+    if not cols:
+        return eci_df
+    metadata = df.drop_duplicates("model_id").set_index("model_id")[cols]
+    return eci_df.join(metadata, on="model_id")
 
 # Define benchmark baskets with their configurations
 BASKETS = {
@@ -114,7 +131,7 @@ def fit_full_model(
     jacobian_type = "analytical" if use_analytical_jacobian else "numerical"
     print(f"\nFitting IRT model ({jacobian_type} Jacobian, {bootstrap_samples} bootstrap samples)...")
 
-    model_df, bench_df = fit_eci_model(
+    model_df, bench_df, _ = fit_eci_model(
         df,
         bootstrap_samples=bootstrap_samples,
         bootstrap_seed=12345,
@@ -221,6 +238,7 @@ def fit_basket(
             bootstrap_samples=bootstrap_samples,
             bootstrap_seed=12345,
         )
+        bootstrap_data = None
 
         # Use the filtered benchmark params for output
         bench_df = basket_bench_df.copy()
@@ -230,7 +248,7 @@ def fit_basket(
         jacobian_type = "analytical" if use_analytical_jacobian else "numerical"
         print(f"\nFitting IRT model ({jacobian_type} Jacobian, {bootstrap_samples} bootstrap samples)...")
 
-        model_df, bench_df = fit_eci_model(
+        model_df, bench_df, bootstrap_data = fit_eci_model(
             df,
             anchor_benchmark=anchor_benchmark,
             bootstrap_samples=bootstrap_samples,
@@ -257,11 +275,23 @@ def fit_basket(
     else:
         print("Computing ECI/EDI scores...")
         try:
-            eci_df, edi_df = compute_eci_scores(model_df, bench_df)
+            results = compute_eci_scores(model_df, bench_df, bootstrap_data)
+            eci_df, edi_df = results.eci_df, results.edi_df
+            if results.diagnostics["n_draws_dropped"]:
+                print(f"  WARNING: {results.diagnostics['n_draws_dropped']} of "
+                      f"{results.diagnostics['n_draws_total']} bootstrap draws dropped")
+            if projection_mode and "capability_ci_low" in eci_df.columns:
+                # Benchmark parameters are frozen in projection mode, so the
+                # scale is fixed and the central affine map transforms the
+                # capability CIs exactly (no per-draw re-anchoring applies).
+                a, b = results.scaling["a"], results.scaling["b"]
+                eci_df["eci_ci_low"] = a + b * eci_df["capability_ci_low"]
+                eci_df["eci_ci_high"] = a + b * eci_df["capability_ci_high"]
         except ValueError as e:
             print(f"  WARNING: Could not compute scaled ECI scores: {e}")
             print("  Returning raw capability scores instead (use --raw to suppress this warning)")
             eci_df, edi_df = use_raw_scores()
+    eci_df = join_model_metadata(eci_df, df)
 
     # Save outputs
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -270,11 +300,7 @@ def fit_basket(
     eci_cols = ["Model", "eci"]
     if "eci_ci_low" in eci_df.columns:
         eci_cols.extend(["eci_ci_low", "eci_ci_high"])
-    # Include metadata columns if present (date, Organization, model_version, source)
-    metadata_cols = ["date", "Organization", "model_version", "source"]
-    for col in metadata_cols:
-        if col in eci_df.columns:
-            eci_cols.append(col)
+    eci_cols += [col for col in MODEL_METADATA_COLS if col in eci_df.columns]
     eci_df[eci_cols].to_csv(eci_output, index=False)
     print(f"\nSaved ECI scores to {eci_output}")
 

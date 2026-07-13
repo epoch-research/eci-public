@@ -45,11 +45,32 @@ Available bootstrap methods (`--bootstrap-method` / `bootstrap_method=`):
 from eci import load_benchmark_data, fit_eci_model, compute_eci_scores
 
 df = load_benchmark_data("https://epoch.ai/data/eci_benchmarks.csv")
-model_df, bench_df = fit_eci_model(df, bootstrap_samples=100)
-eci_df, edi_df = compute_eci_scores(model_df, bench_df)
 
-print(eci_df[["Model", "eci"]].head(10))
+# Raw-scale IRT fit: point estimates + bootstrap draws (no CIs here)
+model_df, bench_df, bootstrap_data = fit_eci_model(df, bootstrap_samples=100)
+
+# ECI/EDI scale conversion. Confidence intervals are constructed here, by
+# re-anchoring every bootstrap draw with its own scale transform so the
+# anchor models (Claude 3.5 Sonnet = 130, GPT-5 = 150) are fixed in every
+# draw. The anchors themselves get NaN CIs: they are pinned by definition.
+results = compute_eci_scores(model_df, bench_df, bootstrap_data)
+
+print(results.eci_df[["Model", "eci", "eci_ci_low", "eci_ci_high"]].head(10))
 ```
+
+`compute_eci_scores` returns an `EciResults` with:
+
+- `eci_df` / `edi_df`: central estimates and CIs on the ECI scale
+- `samples`: the bootstrap draws on the ECI scale (models, benchmark
+  difficulties, and slopes), plus the per-draw scale transforms
+- `scaling`: the central affine map and anchor definitions
+- `diagnostics`: bootstrap draw bookkeeping (draws that cannot define a
+  scale - anchors coinciding - are dropped with a warning, never rescaled
+  with a fallback)
+
+The anchor model names are matched against the `Model` column of the input
+data; renaming those models upstream requires passing the new names
+explicitly (the fit fails loudly if an anchor is missing).
 
 ## Running Tests
 
