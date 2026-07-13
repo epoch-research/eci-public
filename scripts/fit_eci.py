@@ -56,7 +56,7 @@ def main():
     parser.add_argument(
         "--numeric-jacobian",
         action="store_true",
-        help="Use numerical Jacobian instead of analytical (slower, matches website exactly)",
+        help="Use numerical Jacobian instead of analytical (slower)",
     )
     parser.add_argument(
         "--bootstrap-method",
@@ -84,11 +84,6 @@ def main():
 
     print("Computing ECI/EDI scores...")
     results = compute_eci_scores(model_df, bench_df, bootstrap_data)
-    if results.diagnostics["n_draws_dropped"]:
-        print(f"  WARNING: {results.diagnostics['n_draws_dropped']} of "
-              f"{results.diagnostics['n_draws_total']} bootstrap draws dropped:")
-        for reason in results.diagnostics["dropped_reasons"]:
-            print(f"    {reason}")
 
     eci_df = join_model_metadata(results.eci_df, df)
 

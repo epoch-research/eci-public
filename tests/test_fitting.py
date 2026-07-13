@@ -13,12 +13,7 @@ import pytest
 from scipy.stats import spearmanr
 
 from eci import fit_eci_model, load_benchmark_data, compute_eci_scores, BOOTSTRAP_METHODS
-from eci.fitting import (
-    _bootstrap_indices,
-    _capability_jacobian,
-    _irt_jacobian,
-    fit_capabilities_given_benchmarks,
-)
+from eci.fitting import _bootstrap_indices, _irt_jacobian
 
 
 # URLs for test data
@@ -357,30 +352,30 @@ class TestBootstrapMethods:
         """Full fit -> scale integration: every scaled draw must place the
         anchor models exactly on their fixed ECI values."""
         results = _scaled_synthetic_results(synthetic_data, 5)
-        names = results.samples.model_names
+        names = results.draws["model_names"]
+        eci_draws = results.draws["eci"]
+        assert eci_draws.shape[0] > 1
         idx_low = names.index(SYNTH_ANCHORS["anchor_model_low"])
         idx_high = names.index(SYNTH_ANCHORS["anchor_model_high"])
-        assert results.samples.num_samples > 1
-        for draw in results.samples.eci_samples:
-            assert draw[idx_low] == pytest.approx(130.0, abs=1e-9)
-            assert draw[idx_high] == pytest.approx(150.0, abs=1e-9)
+        np.testing.assert_allclose(eci_draws[:, idx_low], 130.0, atol=1e-9)
+        np.testing.assert_allclose(eci_draws[:, idx_high], 150.0, atol=1e-9)
         eci = results.eci_df.set_index("Model")["eci"]
         assert eci["Model 2"] == pytest.approx(130.0, abs=1e-9)
         assert eci["Model 9"] == pytest.approx(150.0, abs=1e-9)
 
 
 def _irt_jacobian_loop_reference(
-    capability, difficulty, discriminability, model_idx, bench_idx,
-    anchor_idx, anchor_discriminability, n_models, n_benchmarks, n_params,
-    regularization_strength,
+    params, capability, difficulty, discriminability, model_idx, bench_idx,
+    anchor_idx, n_models, n_benchmarks, regularization_strength,
 ):
-    """Original loop-based Jacobian assembly, kept as the verification reference."""
+    """Loop-based Jacobian assembly used as the verification reference."""
     from scipy.sparse import lil_matrix
 
     def sigmoid(x):
         return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
 
     n_obs = len(model_idx)
+    n_params = params.size
     z = discriminability[bench_idx] * (capability[model_idx] - difficulty[bench_idx])
     s = sigmoid(z)
     ds = s * (1 - s)
@@ -401,19 +396,11 @@ def _irt_jacobian_loop_reference(
             jac[i, param_idx] = discrim_derivs[i]
 
     if regularization_strength > 0:
-        reg = regularization_strength * (
-            np.sum(capability**2) + np.sum(difficulty**2) +
-            np.sum(discriminability[discriminability != anchor_discriminability]**2)
-        ) / n_params
+        reg = regularization_strength * np.sum(params**2) / n_params
         if reg > 0:
             scale = regularization_strength / (n_params * np.sqrt(reg))
-            for m in range(n_models):
-                jac[n_obs, m] = scale * capability[m]
-            for b in range(n_benchmarks):
-                jac[n_obs, n_models + b] = scale * difficulty[b]
-                if b != anchor_idx:
-                    param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
-                    jac[n_obs, param_idx] = scale * discriminability[b]
+            for j in range(n_params):
+                jac[n_obs, j] = scale * params[j]
 
     return jac.tocsr()
 
@@ -438,14 +425,13 @@ class TestJacobians:
     def test_irt_jacobian_matches_loop_reference(self, regularization, anchor_idx):
         model_idx, bench_idx, capability, difficulty, discriminability = self._random_problem()
         n_models, n_benchmarks = len(capability), len(difficulty)
-        n_params = n_models + n_benchmarks + (n_benchmarks - 1)
-        anchor_discriminability = 1.0
-        discriminability[anchor_idx] = anchor_discriminability
+        discriminability[anchor_idx] = 1.0
+        free = np.arange(n_benchmarks) != anchor_idx
+        params = np.concatenate([capability, difficulty, discriminability[free]])
 
         args = (
-            capability, difficulty, discriminability, model_idx, bench_idx,
-            anchor_idx, anchor_discriminability, n_models, n_benchmarks,
-            n_params, regularization,
+            params, capability, difficulty, discriminability, model_idx,
+            bench_idx, anchor_idx, n_models, n_benchmarks, regularization,
         )
         vectorized = _irt_jacobian(*args).toarray()
         reference = _irt_jacobian_loop_reference(*args).toarray()
@@ -453,53 +439,13 @@ class TestJacobians:
         assert vectorized.shape == reference.shape
         np.testing.assert_array_equal(vectorized, reference)
 
-    @pytest.mark.parametrize("regularization", [0.0, 0.1])
-    def test_capability_jacobian_matches_numerical(self, regularization):
-        model_idx, _, capability, _, _ = self._random_problem()
-        n_models = len(capability)
-        n_obs = len(model_idx)
-        rng = np.random.default_rng(1)
-        difficulty = rng.normal(0, 1.0, n_obs)
-        discriminability = rng.uniform(0.5, 2.0, n_obs)
-
-        def residuals(cap):
-            pred = 1.0 / (1.0 + np.exp(-discriminability * (cap[model_idx] - difficulty)))
-            resid = pred - 0.5
-            if regularization > 0:
-                resid = np.append(
-                    resid, np.sqrt(regularization * np.sum(cap**2) / n_models)
-                )
-            return resid
-
-        analytical = _capability_jacobian(
-            capability, model_idx, difficulty, discriminability,
-            n_models, regularization,
-        ).toarray()
-
-        eps = 1e-7
-        numerical = np.empty_like(analytical)
-        for m in range(n_models):
-            bumped = capability.copy()
-            bumped[m] += eps
-            numerical[:, m] = (residuals(bumped) - residuals(capability)) / eps
-
-        np.testing.assert_allclose(analytical, numerical, atol=1e-5)
-
-    def test_fit_capabilities_analytical_matches_numerical(self, synthetic_data):
-        bench_df = pd.DataFrame({
-            "benchmark": sorted(synthetic_data["benchmark"].unique()),
-        })
-        rng = np.random.default_rng(2)
-        bench_df["difficulty"] = rng.normal(0, 1.0, len(bench_df))
-        bench_df["discriminability"] = rng.uniform(0.8, 1.5, len(bench_df))
-
-        kwargs = dict(bootstrap_samples=0)
-        fast = fit_capabilities_given_benchmarks(
-            synthetic_data, bench_df, use_analytical_jacobian=True, **kwargs
-        )
-        slow = fit_capabilities_given_benchmarks(
-            synthetic_data, bench_df, use_analytical_jacobian=False, **kwargs
-        )
+    def test_analytical_fit_matches_numerical_fit(self, synthetic_data):
+        fast = fit_eci_model(
+            synthetic_data, bootstrap_samples=0, use_analytical_jacobian=True
+        )[0]
+        slow = fit_eci_model(
+            synthetic_data, bootstrap_samples=0, use_analytical_jacobian=False
+        )[0]
         merged = fast.merge(slow, on="model_id", suffixes=("_fast", "_slow"))
         # Exact vs finite-difference Jacobians converge along slightly
         # different optimizer paths; agreement is to ~1e-5, not machine eps

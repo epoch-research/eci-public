@@ -152,9 +152,10 @@ class TestCentralScaling:
 
 class TestPerDrawScaling:
     def test_anchors_pinned_in_every_draw(self, results):
-        for draw in results.samples.eci_samples:
-            assert draw[0] == pytest.approx(LOW_ECI, abs=1e-9)
-            assert draw[1] == pytest.approx(HIGH_ECI, abs=1e-9)
+        eci_draws = results.draws["eci"]
+        assert eci_draws.shape == (N_DRAWS, len(MODEL_IDS))
+        np.testing.assert_allclose(eci_draws[:, 0], LOW_ECI, atol=1e-9)
+        np.testing.assert_allclose(eci_draws[:, 1], HIGH_ECI, atol=1e-9)
 
     def test_anchor_ci_cells_are_nan(self, results):
         by_model = results.eci_df.set_index("Model")
@@ -212,21 +213,20 @@ class TestPerDrawScaling:
         assert res.scaling["ci_level"] == 0.5
 
     def test_round_trip_via_recorded_transforms(self, results, bootstrap_data):
-        for s in range(results.samples.num_samples):
-            raw = (results.samples.eci_samples[s] - results.samples.a_samples[s]) \
-                / results.samples.b_samples[s]
-            np.testing.assert_allclose(
-                raw, bootstrap_data["capability_samples"][s], atol=1e-9
-            )
+        draws = results.draws
+        raw = (draws["eci"] - draws["a"][:, None]) / draws["b"][:, None]
+        np.testing.assert_allclose(
+            raw, np.asarray(bootstrap_data["capability_samples"]), atol=1e-9
+        )
 
 
 class TestBenchmarkParamScaling:
     def test_benchmark_positions_pinned_by_construction(self, results):
         """bench_a tracks the low anchor and bench_b the high anchor in every
         draw, so their EDIs are exactly 130/150 with zero-width CIs."""
-        for draw in results.samples.edi_samples:
-            assert draw[0] == pytest.approx(LOW_ECI, abs=1e-9)
-            assert draw[1] == pytest.approx(HIGH_ECI, abs=1e-9)
+        edi_draws = results.draws["edi"]
+        np.testing.assert_allclose(edi_draws[:, 0], LOW_ECI, atol=1e-9)
+        np.testing.assert_allclose(edi_draws[:, 1], HIGH_ECI, atol=1e-9)
         edi = results.edi_df.set_index("benchmark")
         assert edi.loc["bench_a", "edi_ci_low"] == pytest.approx(LOW_ECI, abs=1e-9)
         assert edi.loc["bench_b", "edi_ci_high"] == pytest.approx(HIGH_ECI, abs=1e-9)
@@ -234,18 +234,16 @@ class TestBenchmarkParamScaling:
     def test_prediction_invariance_per_draw(self, results, bootstrap_data):
         """The IRT prediction disc*(cap - diff) must be preserved by the
         scale change: slope_scaled*(eci - edi) gives the same values."""
-        for s in range(results.samples.num_samples):
-            cap = np.asarray(bootstrap_data["capability_samples"][s])
-            diff = np.asarray(bootstrap_data["difficulty_samples"][s])
-            disc = np.asarray(bootstrap_data["discriminability_samples"][s])
-            raw_pred = disc[None, :] * (cap[:, None] - diff[None, :])
+        cap = np.asarray(bootstrap_data["capability_samples"])
+        diff = np.asarray(bootstrap_data["difficulty_samples"])
+        disc = np.asarray(bootstrap_data["discriminability_samples"])
+        raw_pred = disc[:, None, :] * (cap[:, :, None] - diff[:, None, :])
 
-            eci = results.samples.eci_samples[s]
-            edi = results.samples.edi_samples[s]
-            slope = results.samples.slope_samples[s]
-            scaled_pred = slope[None, :] * (eci[:, None] - edi[None, :])
-
-            np.testing.assert_allclose(scaled_pred, raw_pred, atol=1e-9)
+        draws = results.draws
+        scaled_pred = draws["slope"][:, None, :] * (
+            draws["eci"][:, :, None] - draws["edi"][:, None, :]
+        )
+        np.testing.assert_allclose(scaled_pred, raw_pred, atol=1e-9)
 
 
 class TestDegenerateDraws:
@@ -261,53 +259,28 @@ class TestDegenerateDraws:
         data["discriminability_samples"] = pad + data["discriminability_samples"]
         return data
 
-    def test_bad_draws_dropped_with_warning(self, central_frames):
+    def test_bad_draws_raise_and_name_the_draws(self, central_frames):
         model_df, bench_df = central_frames
         data = self._data_with_bad_draws()
-        with pytest.warns(UserWarning, match="do not define a scale"):
-            res = compute_eci_scores(model_df, bench_df, data, **ANCHOR_KWARGS)
-
-        assert res.diagnostics["n_draws_total"] == N_DRAWS + 2
-        assert res.diagnostics["n_draws_used"] == N_DRAWS
-        assert res.diagnostics["n_draws_dropped"] == 2
-        assert len(res.diagnostics["dropped_reasons"]) == 2
-        assert res.samples.num_samples == N_DRAWS
-
-    def test_quantiles_unaffected_by_dropped_draws(self, central_frames):
-        model_df, bench_df = central_frames
-        data = self._data_with_bad_draws()
-        with pytest.warns(UserWarning):
-            res = compute_eci_scores(model_df, bench_df, data, **ANCHOR_KWARGS)
-        by_model = res.eci_df.set_index("Model")
-        assert by_model.loc["fraction-model", "eci_ci_low"] == pytest.approx(131.0, abs=1e-9)
-        assert by_model.loc["fraction-model", "eci_ci_high"] == pytest.approx(149.0, abs=1e-9)
+        with pytest.raises(ValueError, match=r"draw\(s\) \[0, 1\] do not define a scale"):
+            compute_eci_scores(model_df, bench_df, data, **ANCHOR_KWARGS)
 
 
 class TestWithoutDraws:
     def test_no_bootstrap_data_means_no_ci_columns(self, central_frames):
         model_df, bench_df = central_frames
         res = compute_eci_scores(model_df, bench_df, **ANCHOR_KWARGS)
-        assert res.samples is None
+        assert res.draws is None
         assert "eci_ci_low" not in res.eci_df.columns
         assert "eci_ci_high" not in res.eci_df.columns
         assert "edi_ci_low" not in res.edi_df.columns
-        assert res.diagnostics["n_draws_total"] == 0
 
     def test_empty_draw_list_means_no_ci_columns(self, central_frames, bootstrap_data):
         model_df, bench_df = central_frames
         for key in ("capability_samples", "difficulty_samples", "discriminability_samples"):
             bootstrap_data[key] = []
         res = compute_eci_scores(model_df, bench_df, bootstrap_data, **ANCHOR_KWARGS)
-        assert res.samples is None
-        assert "eci_ci_low" not in res.eci_df.columns
-
-    def test_single_draw_keeps_samples_but_no_cis(self, central_frames, bootstrap_data):
-        model_df, bench_df = central_frames
-        for key in ("capability_samples", "difficulty_samples", "discriminability_samples"):
-            bootstrap_data[key] = bootstrap_data[key][:1]
-        with pytest.warns(UserWarning, match="skipping confidence intervals"):
-            res = compute_eci_scores(model_df, bench_df, bootstrap_data, **ANCHOR_KWARGS)
-        assert res.samples.num_samples == 1
+        assert res.draws is None
         assert "eci_ci_low" not in res.eci_df.columns
 
     def test_anchor_missing_from_samples_raises(self, central_frames, bootstrap_data):

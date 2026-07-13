@@ -27,7 +27,7 @@ python scripts/fit_eci.py
 # With fewer bootstrap samples for a quicker run
 python scripts/fit_eci.py --bootstrap-samples 100
 
-# Use numerical Jacobian (slower, matches website exactly)
+# Use numerical Jacobian (slower)
 python scripts/fit_eci.py --numeric-jacobian
 
 # Use a different bootstrap scheme for confidence intervals
@@ -61,12 +61,12 @@ print(results.eci_df[["Model", "eci", "eci_ci_low", "eci_ci_high"]].head(10))
 `compute_eci_scores` returns an `EciResults` with:
 
 - `eci_df` / `edi_df`: central estimates and CIs on the ECI scale
-- `samples`: the bootstrap draws on the ECI scale (models, benchmark
+- `draws`: the bootstrap draws on the ECI scale (models, benchmark
   difficulties, and slopes), plus the per-draw scale transforms
 - `scaling`: the central affine map and anchor definitions
-- `diagnostics`: bootstrap draw bookkeeping (draws that cannot define a
-  scale - anchors coinciding - are dropped with a warning, never rescaled
-  with a fallback)
+
+A draw whose anchor capabilities coincide or invert cannot define a scale;
+`compute_eci_scores` raises a `ValueError` naming the offending draws.
 
 The anchor model names are matched against the `Model` column of the input
 data; renaming those models upstream requires passing the new names
