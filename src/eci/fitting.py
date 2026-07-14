@@ -280,10 +280,10 @@ def fit_eci_model(
         )
         return result.x, a + b * capability, a + b * difficulty, discriminability / b, a, b
 
-    np.random.seed(42)
+    init_rng = np.random.default_rng(42)
     init_params = np.concatenate([
-        np.random.randn(n_models) * 0.1,
-        np.random.randn(n_benchmarks) * 0.1,
+        init_rng.normal(0.0, 0.1, n_models),
+        init_rng.normal(0.0, 0.1, n_benchmarks),
         np.full(n_benchmarks - 1, 1.0),
     ])
 
