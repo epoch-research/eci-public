@@ -37,7 +37,7 @@ class TestDataLoaderStructure:
         """Test that all required columns are present."""
         required = [
             "model_id", "benchmark_id", "performance", "benchmark",
-            "benchmark_release_date", "optimized", "is_math", "is_coding",
+            "benchmark_release_date",
             "model", "model_version", "Model", "date", "source"
         ]
         missing = set(required) - set(loaded_data.columns)
@@ -59,8 +59,9 @@ class TestDataLoaderAccuracy:
 
     def test_model_coverage(self, loaded_data, expected_data):
         """Test that we have similar model coverage."""
-        loaded_models = set(loaded_data["Model"].unique())
-        expected_models = set(expected_data["Model"].unique())
+        # NaN names can't be compared (or sorted) by name
+        loaded_models = set(loaded_data["Model"].dropna().unique())
+        expected_models = set(expected_data["Model"].dropna().unique())
 
         missing = expected_models - loaded_models
         extra = loaded_models - expected_models

@@ -12,13 +12,8 @@ import pandas as pd
 import pytest
 from scipy.stats import spearmanr
 
-from eci import fit_eci_model, load_benchmark_data, compute_eci_scores, BOOTSTRAP_METHODS
-from eci.fitting import (
-    _bootstrap_indices,
-    _capability_jacobian,
-    _irt_jacobian,
-    fit_capabilities_given_benchmarks,
-)
+from eci import fit_eci_model, load_benchmark_data
+from eci.fitting import _affine_map, _irt_jacobian
 
 
 # URLs for test data
@@ -40,11 +35,7 @@ def benchmark_data():
 @pytest.fixture(scope="module")
 def fitted_model(benchmark_data):
     """Fit the ECI model on benchmark data (no bootstrap for speed)."""
-    model_df, bench_df = fit_eci_model(
-        benchmark_data,
-        bootstrap_samples=0,
-    )
-    eci_df, edi_df = compute_eci_scores(model_df, bench_df)
+    eci_df, edi_df, _ = fit_eci_model(benchmark_data, bootstrap_samples=0)
     return eci_df, edi_df
 
 
@@ -71,6 +62,7 @@ class TestDataLoading:
         assert "performance" in benchmark_data.columns
         assert "benchmark" in benchmark_data.columns
         assert "Model" in benchmark_data.columns
+        assert (benchmark_data["Model"] == benchmark_data["model"]).all()
 
     def test_performance_range(self, benchmark_data):
         """Test that performance values are in valid range."""
@@ -82,6 +74,7 @@ class TestDataLoading:
         assert benchmark_data["model_id"].notna().all()
         assert benchmark_data["benchmark_id"].notna().all()
         assert benchmark_data["performance"].notna().all()
+        assert benchmark_data["Model"].notna().all()
 
 
 class TestModelFitting:
@@ -294,67 +287,66 @@ def synthetic_data():
     return _synthetic_benchmark_data()
 
 
-class TestBootstrapMethods:
-    """Offline tests for the bootstrap resampling schemes."""
+# Anchor models used when fitting synthetic data (well-separated capabilities)
+SYNTH_ANCHORS = dict(anchor_model_low="Model 2", anchor_model_high="Model 9")
 
-    def test_invalid_method_raises(self, synthetic_data):
-        with pytest.raises(ValueError, match="bootstrap_method"):
-            fit_eci_model(
-                synthetic_data, bootstrap_samples=1, bootstrap_method="jackknife"
-            )
 
-    @pytest.mark.parametrize("method", BOOTSTRAP_METHODS)
-    def test_method_produces_valid_cis(self, synthetic_data, method):
-        model_df, bench_df = fit_eci_model(
-            synthetic_data, bootstrap_samples=8, bootstrap_method=method
-        )
-        assert np.isfinite(model_df["capability_ci_low"]).all()
-        assert np.isfinite(model_df["capability_ci_high"]).all()
-        assert (model_df["capability_ci_low"] <= model_df["capability_ci_high"]).all()
-        assert (model_df["capability_se"] > 0).all()
+def _fit_synthetic(synthetic_data, bootstrap_samples):
+    return fit_eci_model(
+        synthetic_data, bootstrap_samples=bootstrap_samples, **SYNTH_ANCHORS
+    )
 
-    @pytest.mark.parametrize("method", BOOTSTRAP_METHODS)
-    def test_method_reproducible_with_seed(self, synthetic_data, method):
+
+class TestBootstrap:
+    """Offline tests for the bootstrap confidence intervals."""
+
+    def test_bootstrap_produces_valid_cis(self, synthetic_data):
+        eci_df, edi_df, _ = _fit_synthetic(synthetic_data, 8)
+        anchors = eci_df["Model"].isin(SYNTH_ANCHORS.values())
+        non_anchor = eci_df[~anchors]
+        assert np.isfinite(non_anchor["eci_ci_low"]).all()
+        assert np.isfinite(non_anchor["eci_ci_high"]).all()
+        assert (non_anchor["eci_ci_low"] <= non_anchor["eci_ci_high"]).all()
+        assert eci_df.loc[anchors, ["eci_ci_low", "eci_ci_high"]].isna().all().all()
+        for col in ("edi", "discriminability_scaled"):
+            lo, hi = edi_df[f"{col}_ci_low"], edi_df[f"{col}_ci_high"]
+            assert np.isfinite(lo).all() and np.isfinite(hi).all()
+            assert (lo <= hi).all()
+
+    def test_reproducible_with_seed(self, synthetic_data):
         def run():
-            return fit_eci_model(
-                synthetic_data, bootstrap_samples=4, bootstrap_method=method
-            )[0]
+            return _fit_synthetic(synthetic_data, 4)[0]
 
         pd.testing.assert_frame_equal(run(), run())
 
-    def test_hierarchical_resampling_covers_every_model(self):
-        rng = np.random.default_rng(0)
-        model_idx = np.repeat(np.arange(10), 4)
-        rows_by_model = [np.flatnonzero(model_idx == m) for m in range(10)]
-        for _ in range(200):
-            idx = _bootstrap_indices(rng, "hierarchical", model_idx.size, rows_by_model)
-            assert idx.size == model_idx.size
-            assert set(model_idx[idx]) == set(range(10))
-            # Each model's rows are resampled only from its own rows
-            assert (model_idx[np.sort(idx)] == model_idx).all()
-
-    def test_methods_give_different_cis(self, synthetic_data):
-        cis = {}
-        for method in ("observation", "hierarchical"):
-            model_df, _ = fit_eci_model(
-                synthetic_data, bootstrap_samples=6, bootstrap_method=method
-            )
-            cis[method] = model_df.sort_values("model_id")["capability_ci_high"].to_numpy()
-        assert not np.allclose(cis["observation"], cis["hierarchical"])
+    def test_anchors_pinned_in_every_draw(self, synthetic_data):
+        """Every scaled draw must place the anchor models exactly on their
+        fixed ECI values."""
+        eci_df, _, draws = _fit_synthetic(synthetic_data, 5)
+        names = draws["model_names"]
+        eci_draws = draws["eci"]
+        assert eci_draws.shape[0] > 1
+        idx_low = names.index(SYNTH_ANCHORS["anchor_model_low"])
+        idx_high = names.index(SYNTH_ANCHORS["anchor_model_high"])
+        np.testing.assert_allclose(eci_draws[:, idx_low], 130.0, atol=1e-9)
+        np.testing.assert_allclose(eci_draws[:, idx_high], 150.0, atol=1e-9)
+        eci = eci_df.set_index("Model")["eci"]
+        assert eci["Model 2"] == pytest.approx(130.0, abs=1e-9)
+        assert eci["Model 9"] == pytest.approx(150.0, abs=1e-9)
 
 
 def _irt_jacobian_loop_reference(
-    capability, difficulty, discriminability, model_idx, bench_idx,
-    anchor_idx, anchor_discriminability, n_models, n_benchmarks, n_params,
-    regularization_strength,
+    params, capability, difficulty, discriminability, model_idx, bench_idx,
+    anchor_idx, n_models, n_benchmarks, regularization_strength,
 ):
-    """Original loop-based Jacobian assembly, kept as the verification reference."""
+    """Loop-based Jacobian assembly used as the verification reference."""
     from scipy.sparse import lil_matrix
 
     def sigmoid(x):
         return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
 
     n_obs = len(model_idx)
+    n_params = params.size
     z = discriminability[bench_idx] * (capability[model_idx] - difficulty[bench_idx])
     s = sigmoid(z)
     ds = s * (1 - s)
@@ -375,19 +367,11 @@ def _irt_jacobian_loop_reference(
             jac[i, param_idx] = discrim_derivs[i]
 
     if regularization_strength > 0:
-        reg = regularization_strength * (
-            np.sum(capability**2) + np.sum(difficulty**2) +
-            np.sum(discriminability[discriminability != anchor_discriminability]**2)
-        ) / n_params
+        reg = regularization_strength * np.sum(params**2) / n_params
         if reg > 0:
             scale = regularization_strength / (n_params * np.sqrt(reg))
-            for m in range(n_models):
-                jac[n_obs, m] = scale * capability[m]
-            for b in range(n_benchmarks):
-                jac[n_obs, n_models + b] = scale * difficulty[b]
-                if b != anchor_idx:
-                    param_idx = n_models + n_benchmarks + (b if b < anchor_idx else b - 1)
-                    jac[n_obs, param_idx] = scale * discriminability[b]
+            for j in range(n_params):
+                jac[n_obs, j] = scale * params[j]
 
     return jac.tocsr()
 
@@ -412,14 +396,13 @@ class TestJacobians:
     def test_irt_jacobian_matches_loop_reference(self, regularization, anchor_idx):
         model_idx, bench_idx, capability, difficulty, discriminability = self._random_problem()
         n_models, n_benchmarks = len(capability), len(difficulty)
-        n_params = n_models + n_benchmarks + (n_benchmarks - 1)
-        anchor_discriminability = 1.0
-        discriminability[anchor_idx] = anchor_discriminability
+        discriminability[anchor_idx] = 1.0
+        free = np.arange(n_benchmarks) != anchor_idx
+        params = np.concatenate([capability, difficulty, discriminability[free]])
 
         args = (
-            capability, difficulty, discriminability, model_idx, bench_idx,
-            anchor_idx, anchor_discriminability, n_models, n_benchmarks,
-            n_params, regularization,
+            params, capability, difficulty, discriminability, model_idx,
+            bench_idx, anchor_idx, n_models, n_benchmarks, regularization,
         )
         vectorized = _irt_jacobian(*args).toarray()
         reference = _irt_jacobian_loop_reference(*args).toarray()
@@ -427,107 +410,106 @@ class TestJacobians:
         assert vectorized.shape == reference.shape
         np.testing.assert_array_equal(vectorized, reference)
 
-    @pytest.mark.parametrize("regularization", [0.0, 0.1])
-    def test_capability_jacobian_matches_numerical(self, regularization):
-        model_idx, _, capability, _, _ = self._random_problem()
-        n_models = len(capability)
-        n_obs = len(model_idx)
-        rng = np.random.default_rng(1)
-        difficulty = rng.normal(0, 1.0, n_obs)
-        discriminability = rng.uniform(0.5, 2.0, n_obs)
-
-        def residuals(cap):
-            pred = 1.0 / (1.0 + np.exp(-discriminability * (cap[model_idx] - difficulty)))
-            resid = pred - 0.5
-            if regularization > 0:
-                resid = np.append(
-                    resid, np.sqrt(regularization * np.sum(cap**2) / n_models)
-                )
-            return resid
-
-        analytical = _capability_jacobian(
-            capability, model_idx, difficulty, discriminability,
-            n_models, regularization,
-        ).toarray()
-
-        eps = 1e-7
-        numerical = np.empty_like(analytical)
-        for m in range(n_models):
-            bumped = capability.copy()
-            bumped[m] += eps
-            numerical[:, m] = (residuals(bumped) - residuals(capability)) / eps
-
-        np.testing.assert_allclose(analytical, numerical, atol=1e-5)
-
-    def test_fit_capabilities_analytical_matches_numerical(self, synthetic_data):
-        bench_df = pd.DataFrame({
-            "benchmark": sorted(synthetic_data["benchmark"].unique()),
-        })
-        rng = np.random.default_rng(2)
-        bench_df["difficulty"] = rng.normal(0, 1.0, len(bench_df))
-        bench_df["discriminability"] = rng.uniform(0.8, 1.5, len(bench_df))
-
-        kwargs = dict(bootstrap_samples=0)
-        fast = fit_capabilities_given_benchmarks(
-            synthetic_data, bench_df, use_analytical_jacobian=True, **kwargs
-        )
-        slow = fit_capabilities_given_benchmarks(
-            synthetic_data, bench_df, use_analytical_jacobian=False, **kwargs
-        )
+    def test_analytical_fit_matches_numerical_fit(self, synthetic_data):
+        fast = fit_eci_model(
+            synthetic_data, bootstrap_samples=0,
+            use_analytical_jacobian=True, **SYNTH_ANCHORS,
+        )[0]
+        slow = fit_eci_model(
+            synthetic_data, bootstrap_samples=0,
+            use_analytical_jacobian=False, **SYNTH_ANCHORS,
+        )[0]
         merged = fast.merge(slow, on="model_id", suffixes=("_fast", "_slow"))
         # Exact vs finite-difference Jacobians converge along slightly
         # different optimizer paths; agreement is to ~1e-5, not machine eps
         np.testing.assert_allclose(
-            merged["capability_fast"], merged["capability_slow"], atol=1e-4
+            merged["eci_fast"], merged["eci_slow"], atol=1e-3
         )
 
 
-class TestOptionalReturns:
-    """Tests for the opt-in extra return values added for downstream callers."""
+class TestFitReturns:
+    """Tests for the fit's output contract."""
 
-    def test_return_bootstrap_samples(self, benchmark_data):
-        model_df, bench_df, bootstrap_data = fit_eci_model(
-            benchmark_data,
-            bootstrap_samples=3,
-            return_bootstrap_samples=True,
+    def test_output_columns(self, synthetic_data):
+        """ECI-scale results only, no metadata passthrough (callers join
+        their own)."""
+        eci_df, edi_df, _ = _fit_synthetic(synthetic_data, 2)
+        assert list(eci_df.columns) == [
+            "model_id", "Model", "eci", "eci_ci_low", "eci_ci_high",
+        ]
+        assert list(edi_df.columns) == [
+            "benchmark_id", "benchmark", "is_anchor", "edi",
+            "discriminability_scaled", "edi_ci_low", "edi_ci_high",
+            "discriminability_scaled_ci_low", "discriminability_scaled_ci_high",
+        ]
+
+    def test_draws_shape(self, synthetic_data):
+        eci_df, edi_df, draws = _fit_synthetic(synthetic_data, 3)
+        assert draws["eci"].shape == (3, len(eci_df))
+        assert draws["edi"].shape == (3, len(edi_df))
+        assert draws["slope"].shape == (3, len(edi_df))
+        assert draws["a"].shape == draws["b"].shape == (3,)
+        assert len(draws["model_ids"]) == len(draws["model_names"]) == len(eci_df)
+        assert len(draws["benchmark_ids"]) == len(draws["benchmark_names"]) == len(edi_df)
+
+    def test_no_bootstrap_gives_no_draws_and_no_ci_columns(self, synthetic_data):
+        eci_df, edi_df, draws = _fit_synthetic(synthetic_data, 0)
+        assert draws is None
+        assert list(eci_df.columns) == ["model_id", "Model", "eci"]
+        assert "edi_ci_low" not in edi_df.columns
+
+    def test_missing_anchor_model_raises_before_fitting(self, synthetic_data):
+        with pytest.raises(ValueError, match="not found"):
+            fit_eci_model(
+                synthetic_data, bootstrap_samples=0,
+                anchor_model_low="No Such Model", anchor_model_high="Model 9",
+            )
+
+
+class TestAffineMap:
+    """The ECI scale map: exact anchor values and the properties every
+    per-draw application relies on."""
+
+    def test_exact_map(self):
+        a, b = _affine_map(1.0, 3.0, 130.0, 150.0)
+        assert (a, b) == (120.0, 10.0)
+
+    def test_anchors_and_midpoint_land_exactly_for_any_capabilities(self):
+        rng = np.random.default_rng(0)
+        for _ in range(100):
+            low = rng.normal(0.0, 2.0)
+            spread = rng.uniform(0.1, 5.0)
+            a, b = _affine_map(low, low + spread, 130.0, 150.0)
+            assert a + b * low == pytest.approx(130.0, abs=1e-9)
+            assert a + b * (low + spread) == pytest.approx(150.0, abs=1e-9)
+            assert a + b * (low + spread / 2) == pytest.approx(140.0, abs=1e-9)
+
+    def test_translation_invariant(self):
+        """Translating all capabilities (e.g. by any raw-scale shift)
+        leaves the mapped values unchanged."""
+        a1, b1 = _affine_map(1.0, 3.0, 130.0, 150.0)
+        a2, b2 = _affine_map(-4.0, -2.0, 130.0, 150.0)
+        assert b1 == pytest.approx(b2)
+        assert a1 + b1 * 2.0 == pytest.approx(a2 + b2 * (-3.0))
+
+    def test_prediction_invariance(self):
+        """The IRT prediction disc*(cap - diff) is preserved by the scale
+        change: slope_scaled*(eci - edi) gives the same values."""
+        rng = np.random.default_rng(1)
+        cap = np.array([0.5, 2.5, 1.0, -0.3, 1.7])
+        diff = rng.normal(0.0, 1.0, 3)
+        disc = rng.uniform(0.5, 2.0, 3)
+        a, b = _affine_map(cap[0], cap[1], 130.0, 150.0)
+        raw = disc[None, :] * (cap[:, None] - diff[None, :])
+        scaled = (disc / b)[None, :] * (
+            (a + b * cap)[:, None] - (a + b * diff)[None, :]
         )
+        np.testing.assert_allclose(scaled, raw, atol=1e-9)
 
-        expected_keys = {
-            "model_ids", "model_names", "benchmark_ids", "benchmark_names",
-            "capability_samples", "difficulty_samples", "discriminability_samples",
-        }
-        assert expected_keys.issubset(bootstrap_data.keys())
-
-        assert len(bootstrap_data["model_names"]) == len(model_df)
-        assert len(bootstrap_data["benchmark_names"]) == len(bench_df)
-
-        for key in ("capability_samples", "difficulty_samples", "discriminability_samples"):
-            samples = bootstrap_data[key]
-            assert len(samples) > 0, f"No samples collected for {key}"
-            assert len(samples) <= 3, f"Got more {key} than requested"
-
-        cap_sample = bootstrap_data["capability_samples"][0]
-        diff_sample = bootstrap_data["difficulty_samples"][0]
-        disc_sample = bootstrap_data["discriminability_samples"][0]
-        assert cap_sample.shape == (len(model_df),)
-        assert diff_sample.shape == (len(bench_df),)
-        assert disc_sample.shape == (len(bench_df),)
-
-    def test_return_scaling(self, benchmark_data):
-        model_df, bench_df = fit_eci_model(benchmark_data, bootstrap_samples=0)
-        eci_df, edi_df, scaling = compute_eci_scores(
-            model_df, bench_df, return_scaling=True,
-        )
-
-        assert set(scaling.keys()) == {
-            "a", "b",
-            "scaling_anchor1", "scaling_anchor1_eci",
-            "scaling_anchor2", "scaling_anchor2_eci",
-        }
-
-        # eci = a + b * capability should reproduce the eci column
-        recomputed = scaling["a"] + scaling["b"] * eci_df["capability"]
-        assert (recomputed - eci_df["eci"]).abs().max() < 1e-6
+    @pytest.mark.parametrize("low,high", [(2.0, 2.0), (3.0, 1.0), (1.0, np.nan)])
+    def test_degenerate_anchors_raise(self, low, high):
+        with pytest.raises(ValueError, match="do not define a scale"):
+            _affine_map(low, high, 130.0, 150.0)
 
 
 if __name__ == "__main__":

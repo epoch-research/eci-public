@@ -102,46 +102,46 @@ RANDOM_BASELINES = {
     "The Agent Company": 0.0,
 }
 
-# Benchmark metadata
-BENCHMARK_METADATA = {
-    "ARC AI2": {"release_date": "2018-03-14", "is_math": False, "is_coding": False},
-    "Chess Puzzles": {"release_date": "2025-01-01", "is_math": False, "is_coding": False},
-    "SimpleQA Verified": {"release_date": "2024-10-30", "is_math": False, "is_coding": False},
-    "BBH": {"release_date": "2022-10-17", "is_math": False, "is_coding": False},
-    "GSM8K": {"release_date": "2021-10-27", "is_math": True, "is_coding": False},
-    "HellaSwag": {"release_date": "2019-05-19", "is_math": False, "is_coding": False},
-    "LAMBADA": {"release_date": "2016-06-20", "is_math": False, "is_coding": False},
-    "MMLU": {"release_date": "2020-09-07", "is_math": False, "is_coding": False},
-    "GPQA diamond": {"release_date": "2023-11-20", "is_math": False, "is_coding": False},
-    "MATH level 5": {"release_date": "2021-03-05", "is_math": True, "is_coding": False},
-    "OTIS Mock AIME 2024-2025": {"release_date": "2024-12-19", "is_math": True, "is_coding": False},
-    "WeirdML": {"release_date": "2025-01-16", "is_math": False, "is_coding": True},
-    "Winogrande": {"release_date": "2019-07-24", "is_math": False, "is_coding": False},
-    "PIQA": {"release_date": "2019-11-26", "is_math": False, "is_coding": False},
-    "TriviaQA": {"release_date": "2017-05-09", "is_math": False, "is_coding": False},
-    "OpenBookQA": {"release_date": "2018-09-08", "is_math": False, "is_coding": False},
-    "ScienceQA": {"release_date": "2022-09-20", "is_math": False, "is_coding": False},
-    "ANLI": {"release_date": "2019-10-31", "is_math": False, "is_coding": False},
-    "FrontierMath-2025-02-28-Private": {"release_date": "2024-11-08", "is_math": True, "is_coding": False},
-    "FrontierMath-Tier-4-2025-07-01-Private": {"release_date": "2024-11-08", "is_math": True, "is_coding": False},
-    "Aider polyglot": {"release_date": "2024-12-21", "is_math": False, "is_coding": True},
-    "SWE-Bench Verified (Bash Only)": {"release_date": "2024-04-01", "is_math": False, "is_coding": True},
-    "ARC-AGI": {"release_date": "2019-11-05", "is_math": False, "is_coding": False},
-    "Balrog": {"release_date": "2025-03-20", "is_math": False, "is_coding": False},
-    "VideoMME": {"release_date": "2024-05-31", "is_math": False, "is_coding": False},
-    "GeoBench": {"release_date": "2025-03-01", "is_math": False, "is_coding": False},
-    "Fiction.LiveBench": {"release_date": "2025-02-21", "is_math": False, "is_coding": False},
-    "Lech Mazur Writing": {"release_date": "2025-01-31", "is_math": False, "is_coding": False},
-    "SimpleBench": {"release_date": "2024-11-04", "is_math": False, "is_coding": False},
-    "Terminal Bench": {"release_date": "2025-02-12", "is_math": False, "is_coding": True},
-    "The Agent Company": {"release_date": "2024-12-18", "is_math": False, "is_coding": True},
-    "GSO-Bench": {"release_date": "2025-03-05", "is_math": True, "is_coding": False},
-    "CadEval": {"release_date": "2025-04-08", "is_math": False, "is_coding": True},
-    "CSQA2": {"release_date": "2020-04-01", "is_math": False, "is_coding": False},
-    "Cybench": {"release_date": "2024-08-14", "is_math": False, "is_coding": True},
-    "OSWorld": {"release_date": "2024-04-11", "is_math": False, "is_coding": True},
-    "VPCT": {"release_date": "2025-04-30", "is_math": False, "is_coding": False},
-    "DeepResearch Bench": {"release_date": "2025-04-08", "is_math": False, "is_coding": False},
+# Benchmark release dates
+BENCHMARK_RELEASE_DATES = {
+    "ARC AI2": "2018-03-14",
+    "Chess Puzzles": "2025-01-01",
+    "SimpleQA Verified": "2024-10-30",
+    "BBH": "2022-10-17",
+    "GSM8K": "2021-10-27",
+    "HellaSwag": "2019-05-19",
+    "LAMBADA": "2016-06-20",
+    "MMLU": "2020-09-07",
+    "GPQA diamond": "2023-11-20",
+    "MATH level 5": "2021-03-05",
+    "OTIS Mock AIME 2024-2025": "2024-12-19",
+    "WeirdML": "2025-01-16",
+    "Winogrande": "2019-07-24",
+    "PIQA": "2019-11-26",
+    "TriviaQA": "2017-05-09",
+    "OpenBookQA": "2018-09-08",
+    "ScienceQA": "2022-09-20",
+    "ANLI": "2019-10-31",
+    "FrontierMath-2025-02-28-Private": "2024-11-08",
+    "FrontierMath-Tier-4-2025-07-01-Private": "2024-11-08",
+    "Aider polyglot": "2024-12-21",
+    "SWE-Bench Verified (Bash Only)": "2024-04-01",
+    "ARC-AGI": "2019-11-05",
+    "Balrog": "2025-03-20",
+    "VideoMME": "2024-05-31",
+    "GeoBench": "2025-03-01",
+    "Fiction.LiveBench": "2025-02-21",
+    "Lech Mazur Writing": "2025-01-31",
+    "SimpleBench": "2024-11-04",
+    "Terminal Bench": "2025-02-12",
+    "The Agent Company": "2024-12-18",
+    "GSO-Bench": "2025-03-05",
+    "CadEval": "2025-04-08",
+    "CSQA2": "2020-04-01",
+    "Cybench": "2024-08-14",
+    "OSWorld": "2024-04-11",
+    "VPCT": "2025-04-30",
+    "DeepResearch Bench": "2025-04-08",
 }
 
 
@@ -286,20 +286,11 @@ def apply_random_baseline_correction(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_benchmark_metadata(df: pd.DataFrame) -> pd.DataFrame:
-    """Add benchmark release dates and category flags."""
+    """Add benchmark release dates."""
     df = df.copy()
-
-    def get_metadata(benchmark, key, default):
-        return BENCHMARK_METADATA.get(benchmark, {}).get(key, default)
-
-    df["benchmark_release_date"] = df["benchmark"].apply(
-        lambda b: get_metadata(b, "release_date", None)
+    df["benchmark_release_date"] = pd.to_datetime(
+        df["benchmark"].map(BENCHMARK_RELEASE_DATES), errors="coerce"
     )
-    df["benchmark_release_date"] = pd.to_datetime(df["benchmark_release_date"], errors="coerce")
-    df["is_math"] = df["benchmark"].apply(lambda b: get_metadata(b, "is_math", False))
-    df["is_coding"] = df["benchmark"].apply(lambda b: get_metadata(b, "is_coding", False))
-    df["optimized"] = True  # All models in ECI are considered "optimized" for their benchmarks
-
     return df
 
 
@@ -420,9 +411,6 @@ def prepare_benchmark_data(
         performance=("performance", "max"),
         benchmark=("benchmark", "first"),
         benchmark_release_date=("benchmark_release_date", "first"),
-        optimized=("optimized", "first"),
-        is_math=("is_math", "first"),
-        is_coding=("is_coding", "first"),
         model=("Model", "first"),  # model column = Model value
         model_version=("model_version", "first"),
         Model=("Model", "first"),
@@ -433,6 +421,6 @@ def prepare_benchmark_data(
     # Reorder columns to match expected format
     return aggregated[[
         "model_id", "benchmark_id", "performance", "benchmark",
-        "benchmark_release_date", "optimized", "is_math", "is_coding",
+        "benchmark_release_date",
         "model", "model_version", "Model", "date", "source"
     ]]

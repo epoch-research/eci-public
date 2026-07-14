@@ -12,11 +12,26 @@ Usage:
 import argparse
 from pathlib import Path
 
-from eci import load_benchmark_data, fit_eci_model, compute_eci_scores, BOOTSTRAP_METHODS
+import pandas as pd
+
+from eci import load_benchmark_data, fit_eci_model
 
 
 DEFAULT_INPUT_URL = "https://epoch.ai/data/eci_benchmarks.csv"
 OUTPUT_DIR = Path(__file__).parent.parent / "outputs"
+
+# Input columns carried over to the ECI output when present (the fit itself
+# returns bare statistical results)
+MODEL_METADATA_COLS = ["date", "Organization", "model_version", "source"]
+
+
+def join_model_metadata(eci_df: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+    """Attach per-model metadata columns from the input data, first value wins."""
+    cols = [c for c in MODEL_METADATA_COLS if c in df.columns]
+    if not cols:
+        return eci_df
+    metadata = df.drop_duplicates("model_id").set_index("model_id")[cols]
+    return eci_df.join(metadata, on="model_id")
 
 
 def main():
@@ -41,13 +56,7 @@ def main():
     parser.add_argument(
         "--numeric-jacobian",
         action="store_true",
-        help="Use numerical Jacobian instead of analytical (slower, matches website exactly)",
-    )
-    parser.add_argument(
-        "--bootstrap-method",
-        choices=BOOTSTRAP_METHODS,
-        default="hierarchical",
-        help="Bootstrap resampling scheme for confidence intervals (default: hierarchical)",
+        help="Use numerical Jacobian instead of analytical (slower)",
     )
     args = parser.parse_args()
 
@@ -57,38 +66,41 @@ def main():
     print(f"  {df['model_id'].nunique()} models, {df['benchmark_id'].nunique()} benchmarks")
 
     jacobian_type = "numerical" if args.numeric_jacobian else "analytical"
-    print(f"\nFitting IRT model ({jacobian_type} Jacobian, {args.bootstrap_samples} "
-          f"'{args.bootstrap_method}' bootstrap samples)...")
-    model_df, bench_df = fit_eci_model(
+    print(f"\nFitting IRT model ({jacobian_type} Jacobian, "
+          f"{args.bootstrap_samples} bootstrap samples)...")
+    eci_df, edi_df, draws = fit_eci_model(
         df,
         bootstrap_samples=args.bootstrap_samples,
-        bootstrap_seed=12345,
-        bootstrap_method=args.bootstrap_method,
         use_analytical_jacobian=not args.numeric_jacobian,
     )
 
-    print("Computing ECI/EDI scores...")
-    eci_df, edi_df = compute_eci_scores(model_df, bench_df)
+    eci_df = join_model_metadata(eci_df, df)
 
     # Prepare output directory
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save ECI scores
     eci_output = args.output_dir / "eci_scores.csv"
-    eci_cols = ["Model", "eci", "eci_ci_low", "eci_ci_high"]
-    # Include metadata columns if present (date, Organization, model_version, source)
-    metadata_cols = ["date", "Organization", "model_version", "source"]
-    for col in metadata_cols:
-        if col in eci_df.columns:
-            eci_cols.append(col)
+    eci_cols = ["Model", "eci"]
+    if "eci_ci_low" in eci_df.columns:
+        eci_cols += ["eci_ci_low", "eci_ci_high"]
+    eci_cols += [col for col in MODEL_METADATA_COLS if col in eci_df.columns]
     eci_df[eci_cols].to_csv(eci_output, index=False)
     print(f"\nSaved ECI scores to {eci_output}")
 
     # Save EDI scores
+    if "benchmark_release_date" in df.columns:
+        release_dates = df.drop_duplicates("benchmark_id").set_index("benchmark_id")["benchmark_release_date"]
+        edi_df = edi_df.join(release_dates, on="benchmark_id")
     edi_output = args.output_dir / "edi_scores.csv"
     edi_cols = ["benchmark", "edi", "discriminability_scaled", "is_anchor"]
     if "benchmark_release_date" in edi_df.columns:
         edi_cols.insert(3, "benchmark_release_date")
+    if "edi_ci_low" in edi_df.columns:
+        edi_cols += [
+            "edi_ci_low", "edi_ci_high",
+            "discriminability_scaled_ci_low", "discriminability_scaled_ci_high",
+        ]
     edi_df[edi_cols].to_csv(edi_output, index=False)
     print(f"Saved EDI scores to {edi_output}")
 
