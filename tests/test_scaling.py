@@ -1,5 +1,5 @@
 """
-Closed-form tests for ECI scale construction (eci.scaling).
+Closed-form tests for ECI scale construction (eci.fitting._scale_to_eci).
 
 The synthetic bootstrap draws are built so the correct per-draw-scaled
 results are known exactly: the anchors' raw capabilities wobble across
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from eci.scaling import compute_eci_scores
+from eci.fitting import _scale_to_eci
 
 ANCHOR_LOW = "Anchor Low"
 ANCHOR_HIGH = "Anchor High"
@@ -29,12 +29,16 @@ BENCH_NAMES = ["bench_a", "bench_b"]
 
 N_DRAWS = 200
 
-ANCHOR_KWARGS = dict(
-    anchor_model_low=ANCHOR_LOW,
-    anchor_eci_low=LOW_ECI,
-    anchor_model_high=ANCHOR_HIGH,
-    anchor_eci_high=HIGH_ECI,
-)
+
+def scale(model_df, bench_df, bootstrap_data=None, ci_level=0.90):
+    return _scale_to_eci(
+        model_df, bench_df, bootstrap_data,
+        anchor_model_low=ANCHOR_LOW,
+        anchor_eci_low=LOW_ECI,
+        anchor_model_high=ANCHOR_HIGH,
+        anchor_eci_high=HIGH_ECI,
+        ci_level=ci_level,
+    )
 
 
 def make_central_frames():
@@ -111,21 +115,21 @@ def bootstrap_data():
 @pytest.fixture()
 def results(central_frames, bootstrap_data):
     model_df, bench_df = central_frames
-    return compute_eci_scores(model_df, bench_df, bootstrap_data, **ANCHOR_KWARGS)
+    return scale(model_df, bench_df, bootstrap_data)
 
 
 class TestCentralScaling:
-    def test_central_map_and_anchor_values(self, results):
-        assert results.scaling["a"] == pytest.approx(120.0)
-        assert results.scaling["b"] == pytest.approx(10.0)
-        eci = results.eci_df.set_index("Model")["eci"]
+    def test_anchor_and_derived_values(self, results):
+        eci_df, _, _ = results
+        eci = eci_df.set_index("Model")["eci"]
         assert eci[ANCHOR_LOW] == pytest.approx(LOW_ECI)
         assert eci[ANCHOR_HIGH] == pytest.approx(HIGH_ECI)
         assert eci["midpoint-model"] == pytest.approx(140.0)
         assert eci["fraction-model"] == pytest.approx(145.0)
 
     def test_edi_and_scaled_slope(self, results):
-        edi = results.edi_df.set_index("benchmark")
+        _, edi_df, _ = results
+        edi = edi_df.set_index("benchmark")
         assert edi.loc["bench_a", "edi"] == pytest.approx(120.0)
         assert edi.loc["bench_b", "edi"] == pytest.approx(130.0)
         assert edi.loc["bench_a", "discriminability_scaled"] == pytest.approx(0.1)
@@ -134,31 +138,39 @@ class TestCentralScaling:
     def test_missing_anchor_raises(self, central_frames):
         model_df, bench_df = central_frames
         with pytest.raises(ValueError, match="not found"):
-            compute_eci_scores(
-                model_df, bench_df,
+            _scale_to_eci(
+                model_df, bench_df, None,
                 anchor_model_low="No Such Model",
+                anchor_eci_low=LOW_ECI,
                 anchor_model_high=ANCHOR_HIGH,
+                anchor_eci_high=HIGH_ECI,
+                ci_level=0.90,
             )
 
     def test_inverted_central_anchors_raise(self, central_frames):
         model_df, bench_df = central_frames
         with pytest.raises(ValueError, match="do not define a scale"):
-            compute_eci_scores(
-                model_df, bench_df,
+            _scale_to_eci(
+                model_df, bench_df, None,
                 anchor_model_low=ANCHOR_HIGH,
+                anchor_eci_low=LOW_ECI,
                 anchor_model_high=ANCHOR_LOW,
+                anchor_eci_high=HIGH_ECI,
+                ci_level=0.90,
             )
 
 
 class TestPerDrawScaling:
     def test_anchors_pinned_in_every_draw(self, results):
-        eci_draws = results.draws["eci"]
+        _, _, draws = results
+        eci_draws = draws["eci"]
         assert eci_draws.shape == (N_DRAWS, len(MODEL_IDS))
         np.testing.assert_allclose(eci_draws[:, 0], LOW_ECI, atol=1e-9)
         np.testing.assert_allclose(eci_draws[:, 1], HIGH_ECI, atol=1e-9)
 
     def test_anchor_ci_cells_are_nan(self, results):
-        by_model = results.eci_df.set_index("Model")
+        eci_df, _, _ = results
+        by_model = eci_df.set_index("Model")
         anchors = by_model.loc[[ANCHOR_LOW, ANCHOR_HIGH]]
         assert anchors["eci_ci_low"].isna().all()
         assert anchors["eci_ci_high"].isna().all()
@@ -174,19 +186,20 @@ class TestPerDrawScaling:
         linspace(130, 150, N_DRAWS), so its 5th/95th percentiles are exactly
         131 and 149.
         """
-        by_model = results.eci_df.set_index("Model")
+        eci_df, _, _ = results
+        by_model = eci_df.set_index("Model")
         assert by_model.loc["midpoint-model", "eci_ci_low"] == pytest.approx(140.0, abs=1e-9)
         assert by_model.loc["midpoint-model", "eci_ci_high"] == pytest.approx(140.0, abs=1e-9)
         assert by_model.loc["fraction-model", "eci_ci_low"] == pytest.approx(131.0, abs=1e-9)
         assert by_model.loc["fraction-model", "eci_ci_high"] == pytest.approx(149.0, abs=1e-9)
 
-    def test_global_scaling_would_disagree(self, results, bootstrap_data):
-        """Demonstrate the gap this module exists to close: pushing raw draws
-        through the central (a, b) leaks anchor noise into midpoint-model's
-        CI, which is exactly [140, 140] under per-draw scaling."""
-        a, b = results.scaling["a"], results.scaling["b"]
+    def test_global_scaling_would_disagree(self, central_frames, bootstrap_data):
+        """Demonstrate the gap per-draw scaling exists to close: pushing raw
+        draws through the central (a, b) = (120, 10) leaks anchor noise into
+        midpoint-model's CI, which is exactly [140, 140] under per-draw
+        scaling."""
         global_scaled = np.vstack([
-            a + b * np.asarray(draw)
+            120.0 + 10.0 * np.asarray(draw)
             for draw in bootstrap_data["capability_samples"]
         ])
         lo, hi = np.quantile(global_scaled[:, 2], [0.05, 0.95])
@@ -197,23 +210,20 @@ class TestPerDrawScaling:
         order. CIs must land on the right models regardless."""
         model_df, bench_df = central_frames
         shuffled = model_df.sample(frac=1, random_state=7)
-        res = compute_eci_scores(shuffled, bench_df, bootstrap_data, **ANCHOR_KWARGS)
-        by_model = res.eci_df.set_index("Model")
+        eci_df, _, _ = scale(shuffled, bench_df, bootstrap_data)
+        by_model = eci_df.set_index("Model")
         assert by_model.loc["fraction-model", "eci_ci_low"] == pytest.approx(131.0, abs=1e-9)
         assert by_model.loc["midpoint-model", "eci_ci_high"] == pytest.approx(140.0, abs=1e-9)
 
     def test_ci_level_respected(self, central_frames, bootstrap_data):
         model_df, bench_df = central_frames
-        res = compute_eci_scores(
-            model_df, bench_df, bootstrap_data, ci_level=0.5, **ANCHOR_KWARGS
-        )
-        by_model = res.eci_df.set_index("Model")
+        eci_df, _, _ = scale(model_df, bench_df, bootstrap_data, ci_level=0.5)
+        by_model = eci_df.set_index("Model")
         assert by_model.loc["fraction-model", "eci_ci_low"] == pytest.approx(135.0, abs=1e-9)
         assert by_model.loc["fraction-model", "eci_ci_high"] == pytest.approx(145.0, abs=1e-9)
-        assert res.scaling["ci_level"] == 0.5
 
     def test_round_trip_via_recorded_transforms(self, results, bootstrap_data):
-        draws = results.draws
+        _, _, draws = results
         raw = (draws["eci"] - draws["a"][:, None]) / draws["b"][:, None]
         np.testing.assert_allclose(
             raw, np.asarray(bootstrap_data["capability_samples"]), atol=1e-9
@@ -224,10 +234,10 @@ class TestBenchmarkParamScaling:
     def test_benchmark_positions_pinned_by_construction(self, results):
         """bench_a tracks the low anchor and bench_b the high anchor in every
         draw, so their EDIs are exactly 130/150 with zero-width CIs."""
-        edi_draws = results.draws["edi"]
-        np.testing.assert_allclose(edi_draws[:, 0], LOW_ECI, atol=1e-9)
-        np.testing.assert_allclose(edi_draws[:, 1], HIGH_ECI, atol=1e-9)
-        edi = results.edi_df.set_index("benchmark")
+        _, edi_df, draws = results
+        np.testing.assert_allclose(draws["edi"][:, 0], LOW_ECI, atol=1e-9)
+        np.testing.assert_allclose(draws["edi"][:, 1], HIGH_ECI, atol=1e-9)
+        edi = edi_df.set_index("benchmark")
         assert edi.loc["bench_a", "edi_ci_low"] == pytest.approx(LOW_ECI, abs=1e-9)
         assert edi.loc["bench_b", "edi_ci_high"] == pytest.approx(HIGH_ECI, abs=1e-9)
 
@@ -239,7 +249,7 @@ class TestBenchmarkParamScaling:
         disc = np.asarray(bootstrap_data["discriminability_samples"])
         raw_pred = disc[:, None, :] * (cap[:, :, None] - diff[:, None, :])
 
-        draws = results.draws
+        _, _, draws = results
         scaled_pred = draws["slope"][:, None, :] * (
             draws["eci"][:, :, None] - draws["edi"][:, None, :]
         )
@@ -263,31 +273,31 @@ class TestDegenerateDraws:
         model_df, bench_df = central_frames
         data = self._data_with_bad_draws()
         with pytest.raises(ValueError, match=r"draw\(s\) \[0, 1\] do not define a scale"):
-            compute_eci_scores(model_df, bench_df, data, **ANCHOR_KWARGS)
+            scale(model_df, bench_df, data)
 
 
 class TestWithoutDraws:
     def test_no_bootstrap_data_means_no_ci_columns(self, central_frames):
         model_df, bench_df = central_frames
-        res = compute_eci_scores(model_df, bench_df, **ANCHOR_KWARGS)
-        assert res.draws is None
-        assert "eci_ci_low" not in res.eci_df.columns
-        assert "eci_ci_high" not in res.eci_df.columns
-        assert "edi_ci_low" not in res.edi_df.columns
+        eci_df, edi_df, draws = scale(model_df, bench_df)
+        assert draws is None
+        assert "eci_ci_low" not in eci_df.columns
+        assert "eci_ci_high" not in eci_df.columns
+        assert "edi_ci_low" not in edi_df.columns
 
     def test_empty_draw_list_means_no_ci_columns(self, central_frames, bootstrap_data):
         model_df, bench_df = central_frames
         for key in ("capability_samples", "difficulty_samples", "discriminability_samples"):
             bootstrap_data[key] = []
-        res = compute_eci_scores(model_df, bench_df, bootstrap_data, **ANCHOR_KWARGS)
-        assert res.draws is None
-        assert "eci_ci_low" not in res.eci_df.columns
+        eci_df, _, draws = scale(model_df, bench_df, bootstrap_data)
+        assert draws is None
+        assert "eci_ci_low" not in eci_df.columns
 
     def test_anchor_missing_from_samples_raises(self, central_frames, bootstrap_data):
         model_df, bench_df = central_frames
         bootstrap_data["model_names"] = ["x0", "x1", "x2", "x3"]
         with pytest.raises(ValueError, match="missing from bootstrap samples"):
-            compute_eci_scores(model_df, bench_df, bootstrap_data, **ANCHOR_KWARGS)
+            scale(model_df, bench_df, bootstrap_data)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from eci import load_benchmark_data, fit_eci_model, compute_eci_scores, BOOTSTRAP_METHODS
+from eci import load_benchmark_data, fit_eci_model
 
 
 DEFAULT_INPUT_URL = "https://epoch.ai/data/eci_benchmarks.csv"
@@ -58,12 +58,6 @@ def main():
         action="store_true",
         help="Use numerical Jacobian instead of analytical (slower)",
     )
-    parser.add_argument(
-        "--bootstrap-method",
-        choices=BOOTSTRAP_METHODS,
-        default="hierarchical",
-        help="Bootstrap resampling scheme for confidence intervals (default: hierarchical)",
-    )
     args = parser.parse_args()
 
     print(f"Loading benchmark data from {args.input}...")
@@ -72,20 +66,15 @@ def main():
     print(f"  {df['model_id'].nunique()} models, {df['benchmark_id'].nunique()} benchmarks")
 
     jacobian_type = "numerical" if args.numeric_jacobian else "analytical"
-    print(f"\nFitting IRT model ({jacobian_type} Jacobian, {args.bootstrap_samples} "
-          f"'{args.bootstrap_method}' bootstrap samples)...")
-    model_df, bench_df, bootstrap_data = fit_eci_model(
+    print(f"\nFitting IRT model ({jacobian_type} Jacobian, "
+          f"{args.bootstrap_samples} bootstrap samples)...")
+    eci_df, edi_df, draws = fit_eci_model(
         df,
         bootstrap_samples=args.bootstrap_samples,
-        bootstrap_seed=12345,
-        bootstrap_method=args.bootstrap_method,
         use_analytical_jacobian=not args.numeric_jacobian,
     )
 
-    print("Computing ECI/EDI scores...")
-    results = compute_eci_scores(model_df, bench_df, bootstrap_data)
-
-    eci_df = join_model_metadata(results.eci_df, df)
+    eci_df = join_model_metadata(eci_df, df)
 
     # Prepare output directory
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -100,7 +89,6 @@ def main():
     print(f"\nSaved ECI scores to {eci_output}")
 
     # Save EDI scores
-    edi_df = results.edi_df
     if "benchmark_release_date" in df.columns:
         release_dates = df.drop_duplicates("benchmark_id").set_index("benchmark_id")["benchmark_release_date"]
         edi_df = edi_df.join(release_dates, on="benchmark_id")
