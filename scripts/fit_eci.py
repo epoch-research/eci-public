@@ -97,7 +97,10 @@ def main():
     if "benchmark_release_date" in edi_df.columns:
         edi_cols.insert(3, "benchmark_release_date")
     if "edi_ci_low" in edi_df.columns:
-        edi_cols += ["edi_ci_low", "edi_ci_high"]
+        edi_cols += [
+            "edi_ci_low", "edi_ci_high",
+            "discriminability_scaled_ci_low", "discriminability_scaled_ci_high",
+        ]
     edi_df[edi_cols].to_csv(edi_output, index=False)
     print(f"Saved EDI scores to {edi_output}")
 

@@ -291,7 +291,6 @@ def add_benchmark_metadata(df: pd.DataFrame) -> pd.DataFrame:
     df["benchmark_release_date"] = pd.to_datetime(
         df["benchmark"].map(BENCHMARK_RELEASE_DATES), errors="coerce"
     )
-    df["optimized"] = True  # All models in ECI are considered "optimized" for their benchmarks
     return df
 
 
@@ -412,7 +411,6 @@ def prepare_benchmark_data(
         performance=("performance", "max"),
         benchmark=("benchmark", "first"),
         benchmark_release_date=("benchmark_release_date", "first"),
-        optimized=("optimized", "first"),
         model=("Model", "first"),  # model column = Model value
         model_version=("model_version", "first"),
         Model=("Model", "first"),
@@ -423,6 +421,6 @@ def prepare_benchmark_data(
     # Reorder columns to match expected format
     return aggregated[[
         "model_id", "benchmark_id", "performance", "benchmark",
-        "benchmark_release_date", "optimized",
+        "benchmark_release_date",
         "model", "model_version", "Model", "date", "source"
     ]]

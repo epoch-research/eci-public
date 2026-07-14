@@ -2,7 +2,8 @@
 ECI (Epoch Capabilities Index) Fitting
 
 A package for fitting the Item Response Theory model used to compute
-ECI scores (model capabilities) and EDI scores (benchmark difficulties).
+ECI scores (model capabilities), EDI scores (benchmark difficulties),
+and benchmark discriminabilities (how sharply scores rise with capability).
 """
 
 from .fitting import fit_eci_model, load_benchmark_data
