@@ -62,6 +62,7 @@ class TestDataLoading:
         assert "performance" in benchmark_data.columns
         assert "benchmark" in benchmark_data.columns
         assert "Model" in benchmark_data.columns
+        assert (benchmark_data["Model"] == benchmark_data["model"]).all()
 
     def test_performance_range(self, benchmark_data):
         """Test that performance values are in valid range."""
@@ -73,6 +74,7 @@ class TestDataLoading:
         assert benchmark_data["model_id"].notna().all()
         assert benchmark_data["benchmark_id"].notna().all()
         assert benchmark_data["performance"].notna().all()
+        assert benchmark_data["Model"].notna().all()
 
 
 class TestModelFitting:

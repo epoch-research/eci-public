@@ -115,12 +115,19 @@ def _irt_jacobian(
 
 
 def load_benchmark_data(url: str = "https://epoch.ai/data/eci_benchmarks.csv") -> pd.DataFrame:
-    """Load benchmark performance data from a CSV path or URL."""
+    """Load benchmark performance data from a CSV path or URL.
+
+    Model names are taken from the CSV's "model" column, which names each
+    release-dated model aggregation. (The CSV's own "Model" column holds the
+    coarser model family, which can span several aggregations and can be
+    empty; it is replaced here.)
+    """
     df = pd.read_csv(url)
-    required_cols = ["model_id", "benchmark_id", "performance", "benchmark", "Model"]
+    required_cols = ["model_id", "benchmark_id", "performance", "benchmark", "model"]
     missing = set(required_cols) - set(df.columns)
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
+    df["Model"] = df["model"]
     return df
 
 
