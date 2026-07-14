@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "eci"
 version = "0.2.0"
-description = "ECI (Epoch Capability Index) fitting for LLM benchmark evaluation"
+description = "ECI (Epoch Capabilities Index) fitting for LLM benchmark evaluation"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"

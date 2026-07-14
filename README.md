@@ -1,8 +1,15 @@
-# ECI: Epoch Capability Index
+# ECI: Epoch Capabilities Index
 
-This package fits the ECI model to compute:
-- **ECI scores**: Unified capability scores for LLMs
-- **EDI scores**: Difficulty scores for benchmarks
+This package fits the ECI model,
+
+    performance = sigmoid(discriminability * (capability - difficulty))
+
+to a table of benchmark scores, estimating:
+
+- **ECI scores**: one capability score per model
+- **EDI scores**: one difficulty score per benchmark
+- **Discriminabilities**: one slope per benchmark, governing how sharply
+  scores rise as capability increases
 
 For details on the methodology, see:
 - **Paper**: [A Rosetta Stone for AI Benchmarks](https://arxiv.org/abs/2512.00193)
@@ -45,12 +52,17 @@ print(eci_df[["Model", "eci", "eci_ci_low", "eci_ci_high"]].head(10))
 Everything is returned on the ECI scale, defined by two anchor models
 (Claude 3.5 Sonnet = 130, GPT-5 = 150):
 
-- `eci_df` / `edi_df`: central estimates and confidence intervals. CIs are
-  quantiles of the bootstrap draws, each draw re-anchored with its own scale
-  transform so the anchor models sit at exactly 130/150 in every draw; the
-  anchors themselves get NaN CIs, being pinned by definition.
+- `eci_df`: each model's `eci`, with confidence intervals.
+- `edi_df`: each benchmark's difficulty (`edi`) and its slope in ECI units
+  (`discriminability_scaled`), both with confidence intervals. Together
+  they trace a benchmark's fitted curve: a model's predicted score is
+  `sigmoid(discriminability_scaled * (eci - edi))`.
 - `draws`: the scaled bootstrap draws (model ECIs, benchmark difficulties
   and slopes) plus the per-draw scale transforms.
+
+CIs are quantiles of the bootstrap draws, each draw re-anchored with its
+own scale transform so the anchor models sit at exactly 130/150 in every
+draw; the anchors themselves get NaN CIs, being pinned by definition.
 
 Bootstrap resampling holds the set of models fixed and resamples each
 model's benchmark results with replacement. Any fit — central or bootstrap —
@@ -71,11 +83,11 @@ pytest
 ## Citation
 
 ```bibtex
-@article{epoch2024aci,
-  title={Artificial Capable Intelligence},
-  author={Epoch AI},
+@article{ho2025rosetta,
+  title={A Rosetta Stone for AI Benchmarks},
+  author={Ho, Anson and Denain, Jean-Stanislas and Atanasov, David and Albanie, Samuel and Shah, Rohin},
   journal={arXiv preprint arXiv:2512.00193},
-  year={2024}
+  year={2025}
 }
 ```
 
