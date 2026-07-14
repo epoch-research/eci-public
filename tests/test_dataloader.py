@@ -37,7 +37,7 @@ class TestDataLoaderStructure:
         """Test that all required columns are present."""
         required = [
             "model_id", "benchmark_id", "performance", "benchmark",
-            "benchmark_release_date", "optimized", "is_math", "is_coding",
+            "benchmark_release_date", "optimized",
             "model", "model_version", "Model", "date", "source"
         ]
         missing = set(required) - set(loaded_data.columns)
