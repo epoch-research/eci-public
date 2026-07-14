@@ -13,7 +13,7 @@ import pytest
 from scipy.stats import spearmanr
 
 from eci import fit_eci_model, load_benchmark_data
-from eci.fitting import _irt_jacobian
+from eci.fitting import _affine_map, _irt_jacobian
 
 
 # URLs for test data
@@ -438,12 +438,10 @@ class TestFitReturns:
 
     def test_draws_shape(self, synthetic_data):
         eci_df, edi_df, draws = _fit_synthetic(synthetic_data, 3)
-        n_draws = draws["eci"].shape[0]
-        assert 0 < n_draws <= 3
-        assert draws["eci"].shape == (n_draws, len(eci_df))
-        assert draws["edi"].shape == (n_draws, len(edi_df))
-        assert draws["slope"].shape == (n_draws, len(edi_df))
-        assert draws["a"].shape == draws["b"].shape == (n_draws,)
+        assert draws["eci"].shape == (3, len(eci_df))
+        assert draws["edi"].shape == (3, len(edi_df))
+        assert draws["slope"].shape == (3, len(edi_df))
+        assert draws["a"].shape == draws["b"].shape == (3,)
         assert len(draws["model_ids"]) == len(draws["model_names"]) == len(eci_df)
         assert len(draws["benchmark_ids"]) == len(draws["benchmark_names"]) == len(edi_df)
 
@@ -452,6 +450,59 @@ class TestFitReturns:
         assert draws is None
         assert list(eci_df.columns) == ["model_id", "Model", "eci"]
         assert "edi_ci_low" not in edi_df.columns
+
+    def test_missing_anchor_model_raises_before_fitting(self, synthetic_data):
+        with pytest.raises(ValueError, match="not found"):
+            fit_eci_model(
+                synthetic_data, bootstrap_samples=0,
+                anchor_model_low="No Such Model", anchor_model_high="Model 9",
+            )
+
+
+class TestAffineMap:
+    """The ECI scale map: exact anchor values and the properties every
+    per-draw application relies on."""
+
+    def test_exact_map(self):
+        a, b = _affine_map(1.0, 3.0, 130.0, 150.0)
+        assert (a, b) == (120.0, 10.0)
+
+    def test_anchors_and_midpoint_land_exactly_for_any_capabilities(self):
+        rng = np.random.default_rng(0)
+        for _ in range(100):
+            low = rng.normal(0.0, 2.0)
+            spread = rng.uniform(0.1, 5.0)
+            a, b = _affine_map(low, low + spread, 130.0, 150.0)
+            assert a + b * low == pytest.approx(130.0, abs=1e-9)
+            assert a + b * (low + spread) == pytest.approx(150.0, abs=1e-9)
+            assert a + b * (low + spread / 2) == pytest.approx(140.0, abs=1e-9)
+
+    def test_translation_invariant(self):
+        """Translating all capabilities (e.g. by any raw-scale shift)
+        leaves the mapped values unchanged."""
+        a1, b1 = _affine_map(1.0, 3.0, 130.0, 150.0)
+        a2, b2 = _affine_map(-4.0, -2.0, 130.0, 150.0)
+        assert b1 == pytest.approx(b2)
+        assert a1 + b1 * 2.0 == pytest.approx(a2 + b2 * (-3.0))
+
+    def test_prediction_invariance(self):
+        """The IRT prediction disc*(cap - diff) is preserved by the scale
+        change: slope_scaled*(eci - edi) gives the same values."""
+        rng = np.random.default_rng(1)
+        cap = np.array([0.5, 2.5, 1.0, -0.3, 1.7])
+        diff = rng.normal(0.0, 1.0, 3)
+        disc = rng.uniform(0.5, 2.0, 3)
+        a, b = _affine_map(cap[0], cap[1], 130.0, 150.0)
+        raw = disc[None, :] * (cap[:, None] - diff[None, :])
+        scaled = (disc / b)[None, :] * (
+            (a + b * cap)[:, None] - (a + b * diff)[None, :]
+        )
+        np.testing.assert_allclose(scaled, raw, atol=1e-9)
+
+    @pytest.mark.parametrize("low,high", [(2.0, 2.0), (3.0, 1.0), (1.0, np.nan)])
+    def test_degenerate_anchors_raise(self, low, high):
+        with pytest.raises(ValueError, match="do not define a scale"):
+            _affine_map(low, high, 130.0, 150.0)
 
 
 if __name__ == "__main__":

@@ -53,9 +53,9 @@ Everything is returned on the ECI scale, defined by two anchor models
   and slopes) plus the per-draw scale transforms.
 
 Bootstrap resampling holds the set of models fixed and resamples each
-model's benchmark results with replacement. A draw whose anchor capabilities
-coincide or invert cannot define a scale; the fit raises a `ValueError`
-naming the offending draws.
+model's benchmark results with replacement. Any fit — central or bootstrap —
+that fails to converge, or whose anchor capabilities coincide or invert
+(defining no scale), raises.
 
 The anchor model names are matched against the `Model` column of the input
 data; renaming those models upstream requires passing the new names
