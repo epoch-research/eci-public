@@ -170,8 +170,8 @@ def fit_eci_model(
           bootstrapping (NaN for the anchor models, whose values are fixed
           by definition rather than estimated). Sorted by eci descending.
         - edi_df: benchmark_id, benchmark, is_anchor, edi,
-          discriminability_scaled, and edi_ci_low / edi_ci_high when
-          bootstrapping. Sorted by edi.
+          discriminability_scaled, each of the latter two with _ci_low /
+          _ci_high columns when bootstrapping. Sorted by edi.
         - draws: None without bootstrapping, else a dict with model_ids,
           model_names, benchmark_ids, benchmark_names, the
           (bootstrap_samples, n) arrays eci, edi, slope, and the per-draw
@@ -340,6 +340,9 @@ def fit_eci_model(
         lo, hi = np.quantile(draws["edi"], [tail, 1.0 - tail], axis=0)
         edi_df["edi_ci_low"] = lo
         edi_df["edi_ci_high"] = hi
+        lo, hi = np.quantile(draws["slope"], [tail, 1.0 - tail], axis=0)
+        edi_df["discriminability_scaled_ci_low"] = lo
+        edi_df["discriminability_scaled_ci_high"] = hi
 
     return (
         eci_df.sort_values("eci", ascending=False),

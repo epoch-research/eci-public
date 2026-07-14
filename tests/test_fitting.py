@@ -299,13 +299,17 @@ class TestBootstrap:
     """Offline tests for the bootstrap confidence intervals."""
 
     def test_bootstrap_produces_valid_cis(self, synthetic_data):
-        eci_df, _, _ = _fit_synthetic(synthetic_data, 8)
+        eci_df, edi_df, _ = _fit_synthetic(synthetic_data, 8)
         anchors = eci_df["Model"].isin(SYNTH_ANCHORS.values())
         non_anchor = eci_df[~anchors]
         assert np.isfinite(non_anchor["eci_ci_low"]).all()
         assert np.isfinite(non_anchor["eci_ci_high"]).all()
         assert (non_anchor["eci_ci_low"] <= non_anchor["eci_ci_high"]).all()
         assert eci_df.loc[anchors, ["eci_ci_low", "eci_ci_high"]].isna().all().all()
+        for col in ("edi", "discriminability_scaled"):
+            lo, hi = edi_df[f"{col}_ci_low"], edi_df[f"{col}_ci_high"]
+            assert np.isfinite(lo).all() and np.isfinite(hi).all()
+            assert (lo <= hi).all()
 
     def test_reproducible_with_seed(self, synthetic_data):
         def run():
@@ -434,6 +438,7 @@ class TestFitReturns:
         assert list(edi_df.columns) == [
             "benchmark_id", "benchmark", "is_anchor", "edi",
             "discriminability_scaled", "edi_ci_low", "edi_ci_high",
+            "discriminability_scaled_ci_low", "discriminability_scaled_ci_high",
         ]
 
     def test_draws_shape(self, synthetic_data):
