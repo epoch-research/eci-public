@@ -1,255 +1,329 @@
 """
-Tests for the dataloader that verify output matches eci_benchmarks.csv.
+Tests for the metadata-driven dataloader.
 
-Note: There are known bugs in benchmark_data.zip that cause some scores to differ
-from the backend data used to generate eci_benchmarks.csv. These tests will print
-detailed information about any mismatches.
+Synthetic tests build a small benchmark_data.zip in-process and verify each
+loading rule. Live tests download the published zip and require its output
+to match the published eci_benchmarks.csv exactly (they skip while the zip
+does not yet ship benchmark_metadata.csv / eci_model_versions.csv).
 """
+
+import zipfile
+from pathlib import Path
 
 import pandas as pd
 import pytest
-from pathlib import Path
 
-from eci.dataloader import prepare_benchmark_data, get_all_benchmark_names
+from eci.dataloader import (
+    METADATA_FILENAME,
+    MODEL_TABLE_FILENAME,
+    download_benchmark_data,
+    get_all_benchmark_names,
+    prepare_benchmark_data,
+)
+
+# Benchmarks whose raw files are not yet published in benchmark_data.zip.
+# Publishing them is an open decision; anything beyond this set is a bug.
+KNOWN_UNPUBLISHED = {
+    "FrontierMath-Tiers-1-3-v2-Private",
+    "FrontierMath-Tier-4-v2-Private",
+    "EBR-bench",
+}
 
 EXPECTED_URL = "https://epoch.ai/data/eci_benchmarks.csv"
 
 
+#########################
+# Synthetic fixtures
+#########################
+
+METADATA = pd.DataFrame([
+    ("Alpha", "alpha.csv", "Score", 1.0, 0.25, 1.0, "2020-01-01", "", True),
+    ("Beta", "beta.csv", "Pct", 0.01, 0.0, 0.9, "2021-06-15", "", True),
+    ("Gamma", "gamma.csv", "Score", 1.0, 0.0, 1.0, "2024-01-01", "", True),
+    ("Old Bench", "old.csv", "Score", 1.0, 0.0, 1.0, "2022-01-01", "New Bench", True),
+    ("New Bench", "new.csv", "Score", 1.0, 0.0, 1.0, "2025-01-01", "", True),
+    ("Ghost", "ghost.csv", "Score", 1.0, 0.0, 1.0, "2025-01-01", "", True),
+    # Display-only row: carries a baseline/ceiling for site charts, not fit
+    ("DisplayOnly", "alpha.csv", "Score", 1.0, 0.5, 1.0, "2020-01-01", "", False),
+], columns=["benchmark", "source_file", "score_column", "scale",
+            "random_baseline", "score_ceiling", "release_date", "superseded_by",
+            "in_eci"])
+
+MODEL_TABLE = pd.DataFrame([
+    ("v1", "Group One", "2024-01-01"),
+    ("v1b", "Group One", "2024-06-01"),
+    ("v2", "Group Two", "2023-05-01"),
+    ("v-mix-old", "Mixed", "2022-05-01"),
+    ("v-mix-new", "Mixed", "2024-03-01"),
+    ("v-nodate", "No Date", None),
+], columns=["model_version", "model_group", "date"])
+
+SOURCE_FILES = {
+    "alpha.csv": pd.DataFrame({
+        "Model version": ["v1", "v1b", "v2", "v-mix-old", "v-nodate", "v1"],
+        "Score": [0.75, 0.85, 0.1, 0.7, 0.9, "N/A"],
+        "Source": ["src-a"] * 6,
+    }),
+    "beta.csv": pd.DataFrame({
+        # Pct is on a 0-100 scale (scale 0.01), ceiling 0.9
+        "Model version": ["v1", "v-mix-old", "v2"],
+        "Pct": [45.0, 90.0, 120.0],
+    }),
+    "gamma.csv": pd.DataFrame({
+        "Model version": ["v1", "v-mix-new"],
+        "Score": [0.5, 0.6],
+    }),
+    "old.csv": pd.DataFrame({
+        "Model version": ["v1", "v-mix-new"],
+        "Score": [0.4, 0.3],
+    }),
+    "new.csv": pd.DataFrame({
+        "Model version": ["v1b"],
+        "Score": [0.55],
+    }),
+}
+
+
 @pytest.fixture(scope="module")
-def loaded_data():
-    """Load data from benchmark_data.zip."""
+def synthetic_zip(tmp_path_factory):
+    path = tmp_path_factory.mktemp("data") / "benchmark_data.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, df in SOURCE_FILES.items():
+            zf.writestr(name, df.to_csv(index=False))
+        zf.writestr(METADATA_FILENAME, METADATA.to_csv(index=False))
+        zf.writestr(MODEL_TABLE_FILENAME, MODEL_TABLE.to_csv(index=False))
+    return path
+
+
+@pytest.fixture(scope="module")
+def loaded(synthetic_zip):
+    with pytest.warns(UserWarning, match="Ghost"):
+        return prepare_benchmark_data(synthetic_zip, min_benchmarks_per_model=2)
+
+
+def _row(df, model, benchmark):
+    rows = df[(df["model"] == model) & (df["benchmark"] == benchmark)]
+    assert len(rows) <= 1
+    return rows.iloc[0] if len(rows) else None
+
+
+#########################
+# Mechanism tests
+#########################
+
+class TestLoading:
+    def test_output_schema(self, loaded):
+        assert list(loaded.columns) == [
+            "model_id", "benchmark_id", "performance", "benchmark",
+            "benchmark_release_date", "model", "model_version", "Model",
+            "date", "source",
+        ]
+        assert (loaded["Model"] == loaded["model"]).all()
+        assert loaded["performance"].between(0, 1).all()
+
+    def test_baseline_and_ceiling_normalization(self, loaded):
+        # Alpha: baseline 0.25 -> (0.85 - 0.25) / 0.75 for Group One's best
+        alpha = _row(loaded, "Group One", "Alpha")
+        assert alpha["performance"] == pytest.approx((0.85 - 0.25) / 0.75)
+        # Beta: scale 0.01 then ceiling 0.9 -> 45 -> 0.45 -> 0.5
+        beta = _row(loaded, "Group One", "Beta")
+        assert beta["performance"] == pytest.approx(0.45 / 0.9)
+
+    def test_clipping(self, loaded):
+        # Group Two's Alpha score 0.1 is below the 0.25 baseline: clips to 0
+        assert _row(loaded, "Group Two", "Alpha")["performance"] == 0.0
+        # Group Two's Beta score 120 -> 1.2 -> above ceiling: clips to 1
+        assert _row(loaded, "Group Two", "Beta")["performance"] == 1.0
+
+    def test_non_numeric_scores_dropped(self, loaded):
+        # v1's second Alpha row ("N/A") must not crash or beat the 0.85
+        alpha = _row(loaded, "Group One", "Alpha")
+        assert alpha["performance"] == pytest.approx((0.85 - 0.25) / 0.75)
+
+    def test_supersession(self, loaded):
+        # Group One has New Bench, so its Old Bench score is dropped
+        assert _row(loaded, "Group One", "Old Bench") is None
+        assert _row(loaded, "Group One", "New Bench") is not None
+        # Mixed has no New Bench score, so it keeps Old Bench
+        assert _row(loaded, "Mixed", "Old Bench") is not None
+
+    def test_qualification_counts_only_fit_rows(self, synthetic_zip):
+        # Mixed spans 4 distinct benchmarks, but Alpha and Beta come from its
+        # 2022 version: only Old Bench and Gamma survive the date filter, so
+        # at min 3 the model is excluded outright.
+        with pytest.warns(UserWarning, match="Ghost"):
+            out = prepare_benchmark_data(synthetic_zip, min_benchmarks_per_model=3)
+        assert "Mixed" not in set(out["model"])
+
+    def test_date_filter_trims_old_rows(self, loaded):
+        # At min 2, Mixed qualifies on its two post-2023 rows; the 2022 rows
+        # stay out of the output either way.
+        mixed = loaded[loaded["model"] == "Mixed"]
+        assert set(mixed["benchmark"]) == {"Gamma", "Old Bench"}
+
+    def test_rows_without_dates_are_dropped(self, loaded):
+        assert "No Date" not in set(loaded["model"])
+
+    def test_aggregation_takes_max_and_newest_version(self, loaded):
+        # Group One scored Alpha with v1 (0.75) and v1b (0.85): max wins,
+        # and the newest-dated version is reported
+        alpha = _row(loaded, "Group One", "Alpha")
+        assert alpha["model_version"] == "v1b"
+        assert alpha["date"] == pd.Timestamp("2024-06-01")
+
+    def test_release_dates_from_config(self, loaded):
+        beta = _row(loaded, "Group One", "Beta")
+        assert beta["benchmark_release_date"] == pd.Timestamp("2021-06-15")
+
+    def test_min_benchmarks_per_model(self, synthetic_zip):
+        out = prepare_benchmark_data(synthetic_zip, min_benchmarks_per_model=3)
+        assert "Group Two" not in set(out["model"])  # only Alpha + Beta
+
+
+class TestExtraScores:
+    def test_extra_scores_are_normalized_and_grouped(self, synthetic_zip):
+        extra = pd.DataFrame({
+            "model_version": ["stage-v", "stage-v", "stage-v"],
+            "benchmark": ["Alpha", "Beta", "Gamma"],
+            "performance": [0.85, 45.0, 0.7],
+            "source": ["staging"] * 3,
+        })
+        out = prepare_benchmark_data(
+            synthetic_zip, min_benchmarks_per_model=2, extra_scores=extra,
+        )
+        row = _row(out, "stage-v", "Alpha")
+        assert row["performance"] == pytest.approx((0.85 - 0.25) / 0.75)
+        assert _row(out, "stage-v", "Beta")["performance"] == pytest.approx(0.5)
+
+    def test_extra_scores_unknown_benchmark_warns(self, synthetic_zip):
+        extra = pd.DataFrame({
+            "model_version": ["stage-v"] * 2,
+            "benchmark": ["Alpha", "Nope"],
+            "performance": [0.9, 0.9],
+        })
+        with pytest.warns(UserWarning, match="Nope"):
+            out = prepare_benchmark_data(
+                synthetic_zip, min_benchmarks_per_model=1, extra_scores=extra,
+            )
+        assert "Nope" not in set(out["benchmark"])
+
+
+class TestDisplayOnlyRows:
+    def test_display_only_benchmarks_are_not_loaded(self, loaded):
+        assert "DisplayOnly" not in set(loaded["benchmark"])
+
+
+class TestBenchmarkFiltering:
+    def test_get_all_benchmark_names(self, synthetic_zip):
+        names = get_all_benchmark_names(synthetic_zip)
+        assert names == set(METADATA.loc[METADATA["in_eci"], "benchmark"])
+        assert "DisplayOnly" not in names
+
+    def test_include_benchmarks(self, synthetic_zip):
+        out = prepare_benchmark_data(
+            synthetic_zip, min_benchmarks_per_model=1,
+            include_benchmarks={"Alpha", "Beta"},
+        )
+        assert set(out["benchmark"]) <= {"Alpha", "Beta"}
+
+    def test_exclude_benchmarks(self, synthetic_zip):
+        out = prepare_benchmark_data(
+            synthetic_zip, min_benchmarks_per_model=1,
+            exclude_benchmarks={"Alpha"},
+        )
+        assert "Alpha" not in set(out["benchmark"])
+
+    def test_cannot_use_both_include_and_exclude(self, synthetic_zip):
+        with pytest.raises(ValueError, match="Cannot specify both"):
+            prepare_benchmark_data(
+                synthetic_zip,
+                include_benchmarks={"Alpha"}, exclude_benchmarks={"Beta"},
+            )
+
+    def test_unknown_benchmark_raises(self, synthetic_zip):
+        with pytest.raises(ValueError, match="Unknown benchmark names"):
+            prepare_benchmark_data(synthetic_zip, include_benchmarks={"Alpha", "Nonexistent"})
+        with pytest.raises(ValueError, match="Unknown benchmark names"):
+            prepare_benchmark_data(synthetic_zip, exclude_benchmarks={"Nonexistent"})
+
+
+class TestMissingTables:
+    def _zip_without(self, tmp_path, *omit):
+        path = tmp_path / "partial.zip"
+        with zipfile.ZipFile(path, "w") as zf:
+            for name, df in SOURCE_FILES.items():
+                zf.writestr(name, df.to_csv(index=False))
+            if METADATA_FILENAME not in omit:
+                zf.writestr(METADATA_FILENAME, METADATA.to_csv(index=False))
+            if MODEL_TABLE_FILENAME not in omit:
+                zf.writestr(MODEL_TABLE_FILENAME, MODEL_TABLE.to_csv(index=False))
+        return path
+
+    def test_missing_config_raises(self, tmp_path):
+        with pytest.raises(ValueError, match=METADATA_FILENAME):
+            prepare_benchmark_data(self._zip_without(tmp_path, METADATA_FILENAME))
+
+    def test_missing_model_table_raises(self, tmp_path):
+        with pytest.raises(ValueError, match=MODEL_TABLE_FILENAME):
+            prepare_benchmark_data(self._zip_without(tmp_path, MODEL_TABLE_FILENAME))
+
+    def test_overrides_stand_in_for_zip_tables(self, tmp_path):
+        path = self._zip_without(tmp_path, METADATA_FILENAME, MODEL_TABLE_FILENAME)
+        with pytest.warns(UserWarning, match="Ghost"):
+            out = prepare_benchmark_data(
+                path, min_benchmarks_per_model=2,
+                metadata=METADATA, model_table=MODEL_TABLE,
+            )
+        assert len(out) > 0
+
+
+#########################
+# Live-data equivalence
+#########################
+
+@pytest.fixture(scope="module")
+def live_output():
+    dfs = download_benchmark_data(cache_dir=Path(".cache"))
+    if METADATA_FILENAME not in dfs or MODEL_TABLE_FILENAME not in dfs:
+        pytest.skip(
+            "published benchmark_data.zip does not ship "
+            f"{METADATA_FILENAME} / {MODEL_TABLE_FILENAME} yet"
+        )
     return prepare_benchmark_data(cache_dir=Path(".cache"))
 
 
 @pytest.fixture(scope="module")
-def expected_data():
-    """Load expected data from eci_benchmarks.csv."""
+def expected():
     df = pd.read_csv(EXPECTED_URL)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["benchmark_release_date"] = pd.to_datetime(df["benchmark_release_date"], errors="coerce")
     return df
 
 
-class TestDataLoaderStructure:
-    """Test that the dataloader produces valid output structure."""
+class TestLiveEquivalence:
+    """The published zip must reproduce the published eci_benchmarks.csv."""
 
-    def test_required_columns(self, loaded_data):
-        """Test that all required columns are present."""
-        required = [
-            "model_id", "benchmark_id", "performance", "benchmark",
-            "benchmark_release_date",
-            "model", "model_version", "Model", "date", "source"
-        ]
-        missing = set(required) - set(loaded_data.columns)
-        assert not missing, f"Missing columns: {missing}"
+    def test_models_match_exactly(self, live_output, expected):
+        assert set(live_output["model"]) == set(expected["model"])
 
-    def test_has_data(self, loaded_data):
-        """Test that data was loaded."""
-        assert len(loaded_data) > 0
-
-    def test_performance_range(self, loaded_data):
-        """Test that performance values are valid."""
-        assert loaded_data["performance"].min() >= 0
-        assert loaded_data["performance"].max() <= 1
-        assert loaded_data["performance"].notna().all()
-
-
-class TestDataLoaderAccuracy:
-    """Test accuracy against expected eci_benchmarks.csv."""
-
-    def test_model_coverage(self, loaded_data, expected_data):
-        """Test that we have similar model coverage."""
-        # NaN names can't be compared (or sorted) by name
-        loaded_models = set(loaded_data["Model"].dropna().unique())
-        expected_models = set(expected_data["Model"].dropna().unique())
-
-        missing = expected_models - loaded_models
-        extra = loaded_models - expected_models
-
-        coverage = len(loaded_models & expected_models) / len(expected_models)
-
-        print(f"\n{'='*60}")
-        print("Model Coverage")
-        print(f"{'='*60}")
-        print(f"Expected models: {len(expected_models)}")
-        print(f"Loaded models: {len(loaded_models)}")
-        print(f"Coverage: {coverage:.1%}")
-
-        if missing:
-            print(f"\nMissing models ({len(missing)}):")
-            for m in sorted(missing)[:10]:
-                print(f"  - {m}")
-            if len(missing) > 10:
-                print(f"  ... and {len(missing) - 10} more")
-
-        if extra:
-            print(f"\nExtra models ({len(extra)}):")
-            for m in sorted(extra)[:10]:
-                print(f"  - {m}")
-
-        # Allow some tolerance for coverage
-        assert coverage > 0.8, f"Model coverage too low: {coverage:.1%}"
-
-    def test_benchmark_coverage(self, loaded_data, expected_data):
-        """Test that we have similar benchmark coverage."""
-        loaded_benchmarks = set(loaded_data["benchmark"].unique())
-        expected_benchmarks = set(expected_data["benchmark"].unique())
-
-        missing = expected_benchmarks - loaded_benchmarks
-        extra = loaded_benchmarks - expected_benchmarks
-
-        coverage = len(loaded_benchmarks & expected_benchmarks) / len(expected_benchmarks)
-
-        print(f"\n{'='*60}")
-        print("Benchmark Coverage")
-        print(f"{'='*60}")
-        print(f"Expected benchmarks: {len(expected_benchmarks)}")
-        print(f"Loaded benchmarks: {len(loaded_benchmarks)}")
-        print(f"Coverage: {coverage:.1%}")
-
-        if missing:
-            print(f"\nMissing benchmarks: {sorted(missing)}")
-        if extra:
-            print(f"\nExtra benchmarks: {sorted(extra)}")
-
-        assert coverage > 0.8, f"Benchmark coverage too low: {coverage:.1%}"
-
-    def test_score_matching(self, loaded_data, expected_data):
-        """Test that scores match for common (Model, benchmark) pairs."""
-        # Merge on Model and benchmark
-        loaded = loaded_data[["Model", "benchmark", "performance"]].copy()
-        expected = expected_data[["Model", "benchmark", "performance"]].copy()
-
-        merged = loaded.merge(
-            expected,
-            on=["Model", "benchmark"],
-            suffixes=("_loaded", "_expected"),
-            how="inner"
+    def test_benchmark_gaps_are_known(self, live_output, expected):
+        missing = set(expected["benchmark"]) - set(live_output["benchmark"])
+        assert missing <= KNOWN_UNPUBLISHED, (
+            f"new unpublished benchmarks: {missing - KNOWN_UNPUBLISHED}"
         )
+        assert set(live_output["benchmark"]) <= set(expected["benchmark"])
 
-        merged["diff"] = merged["performance_loaded"] - merged["performance_expected"]
-        merged["abs_diff"] = merged["diff"].abs()
-
-        # Find mismatches (with tolerance for floating point)
-        tolerance = 1e-6
-        mismatches = merged[merged["abs_diff"] > tolerance].copy()
-
-        print(f"\n{'='*60}")
-        print("Score Matching")
-        print(f"{'='*60}")
-        print(f"Common (Model, benchmark) pairs: {len(merged)}")
-        print(f"Matching pairs: {len(merged) - len(mismatches)}")
-        print(f"Mismatching pairs: {len(mismatches)}")
-
-        if len(mismatches) > 0:
-            print(f"\nMismatches (tolerance > {tolerance}):")
-            mismatches_sorted = mismatches.sort_values("abs_diff", ascending=False)
-            print(mismatches_sorted[[
-                "Model", "benchmark", "performance_loaded", "performance_expected", "diff"
-            ]].head(20).to_string(index=False))
-
-            if len(mismatches) > 20:
-                print(f"... and {len(mismatches) - 20} more mismatches")
-
-            # Summary statistics
-            print(f"\nMismatch statistics:")
-            print(f"  Mean absolute difference: {mismatches['abs_diff'].mean():.6f}")
-            print(f"  Max absolute difference: {mismatches['abs_diff'].max():.6f}")
-
-        match_rate = (len(merged) - len(mismatches)) / len(merged) if len(merged) > 0 else 0
-        print(f"\nMatch rate: {match_rate:.1%}")
-
-        # This assertion may fail due to known bugs - just warn
-        if match_rate < 0.95:
-            print(f"\nWARNING: Match rate ({match_rate:.1%}) is below 95%")
-            print("This may be due to known bugs in benchmark_data.zip")
-
-    def test_row_count(self, loaded_data, expected_data):
-        """Test that row counts are similar."""
-        loaded_count = len(loaded_data)
-        expected_count = len(expected_data)
-
-        print(f"\n{'='*60}")
-        print("Row Count")
-        print(f"{'='*60}")
-        print(f"Expected rows: {expected_count}")
-        print(f"Loaded rows: {loaded_count}")
-        print(f"Difference: {loaded_count - expected_count}")
-
-        # Allow some tolerance
-        ratio = loaded_count / expected_count if expected_count > 0 else 0
-        assert 0.8 < ratio < 1.2, f"Row count ratio {ratio:.2f} outside acceptable range"
-
-
-class TestBenchmarkFiltering:
-    """Test benchmark filtering functionality."""
-
-    def test_get_all_benchmark_names(self):
-        """Test that get_all_benchmark_names returns expected benchmarks."""
-        names = get_all_benchmark_names()
-        assert isinstance(names, set)
-        assert len(names) > 0
-        # Check some expected benchmarks exist
-        assert "MMLU" in names
-        assert "Winogrande" in names
-        assert "GPQA diamond" in names
-
-    def test_include_benchmarks(self):
-        """Test including only specific benchmarks."""
-        include = {"MMLU", "Winogrande", "GSM8K", "GPQA diamond", "HellaSwag"}
-        filtered = prepare_benchmark_data(
-            cache_dir=Path(".cache"),
-            include_benchmarks=include,
-            min_benchmarks_per_model=4,  # Allow models with at least 4 of the 5 benchmarks
+    def test_performance_matches_exactly(self, live_output, expected):
+        merged = live_output.merge(
+            expected, on=["model", "benchmark"], suffixes=("_new", "_live"),
         )
-
-        benchmarks_in_result = set(filtered["benchmark"].unique())
-        # All returned benchmarks should be from our include set
-        assert benchmarks_in_result.issubset(include), (
-            f"Unexpected benchmarks: {benchmarks_in_result - include}"
+        assert len(merged) > 0.9 * len(live_output)
+        diff = (merged["performance_new"] - merged["performance_live"]).abs()
+        assert (diff < 1e-9).all(), (
+            merged.loc[diff >= 1e-9, ["model", "benchmark",
+                                      "performance_new", "performance_live"]]
+            .head(20)
+            .to_string(index=False)
         )
-        # Should have at least some of the requested benchmarks
-        assert len(benchmarks_in_result) > 0, "No benchmarks returned"
-
-    def test_exclude_benchmarks(self):
-        """Test excluding specific benchmarks."""
-        exclude = {"MMLU", "Winogrande"}
-        filtered = prepare_benchmark_data(
-            cache_dir=Path(".cache"),
-            exclude_benchmarks=exclude,
-        )
-
-        benchmarks_in_result = set(filtered["benchmark"].unique())
-        assert not (benchmarks_in_result & exclude), (
-            f"Excluded benchmarks found in result: {benchmarks_in_result & exclude}"
-        )
-        # Should still have other benchmarks
-        assert len(benchmarks_in_result) > 0
-
-    def test_cannot_use_both_include_and_exclude(self):
-        """Test that using both include and exclude raises error."""
-        with pytest.raises(ValueError, match="Cannot specify both"):
-            prepare_benchmark_data(
-                cache_dir=Path(".cache"),
-                include_benchmarks={"MMLU"},
-                exclude_benchmarks={"Winogrande"},
-            )
-
-    def test_unknown_benchmark_in_include_raises_error(self):
-        """Test that unknown benchmark names in include_benchmarks raises error."""
-        with pytest.raises(ValueError, match="Unknown benchmark names"):
-            prepare_benchmark_data(
-                cache_dir=Path(".cache"),
-                include_benchmarks={"MMLU", "NonexistentBenchmark"},
-            )
-
-    def test_unknown_benchmark_in_exclude_raises_error(self):
-        """Test that unknown benchmark names in exclude_benchmarks raises error."""
-        with pytest.raises(ValueError, match="Unknown benchmark names"):
-            prepare_benchmark_data(
-                cache_dir=Path(".cache"),
-                exclude_benchmarks={"NonexistentBenchmark"},
-            )
 
 
 if __name__ == "__main__":
