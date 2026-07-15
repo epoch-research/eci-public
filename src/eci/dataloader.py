@@ -12,9 +12,11 @@ builds the zip and then consumes it):
   (source_file, score_column, scale), how to normalize them
   (random_baseline, score_ceiling), its release_date, and optionally a
   superseded_by benchmark that replaces it model-for-model.
-- ``eci_model_versions.csv``: maps each model version to its model group
-  (the release-dated aggregation the fit treats as one model) and the
-  group-resolved release date.
+- ``model_metadata.csv``: one row per model version. The loader uses
+  model_version, model_group (the release-dated aggregation the fit treats
+  as one model), and date (the group-resolved release date); additional
+  columns (display_name, organization, country, accessibility,
+  training_compute_flop) describe the version for display and analysis.
 """
 
 import io
@@ -28,8 +30,8 @@ import numpy as np
 import pandas as pd
 
 BENCHMARK_DATA_URL = "https://epoch.ai/data/benchmark_data.zip"
-METADATA_FILENAME = "benchmark_metadata.csv"
-MODEL_TABLE_FILENAME = "eci_model_versions.csv"
+BENCHMARK_METADATA_FILENAME = "benchmark_metadata.csv"
+MODEL_METADATA_FILENAME = "model_metadata.csv"
 
 
 def download_benchmark_data(source: str | Path = BENCHMARK_DATA_URL, cache_dir: Optional[Path] = None) -> dict[str, pd.DataFrame]:
@@ -77,19 +79,20 @@ def _extract_csvs(zf: zipfile.ZipFile) -> dict[str, pd.DataFrame]:
 
 def load_benchmark_metadata(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Return the benchmark policy table shipped in the zip."""
-    if METADATA_FILENAME not in dfs:
+    if BENCHMARK_METADATA_FILENAME not in dfs:
         raise ValueError(
-            f"{METADATA_FILENAME} not found in the benchmark data. The zip at "
-            f"{BENCHMARK_DATA_URL} ships this table; pass metadata= to override."
+            f"{BENCHMARK_METADATA_FILENAME} not found in the benchmark data. "
+            f"The zip at {BENCHMARK_DATA_URL} ships this table; pass "
+            f"benchmark_metadata= to override."
         )
-    metadata = dfs[METADATA_FILENAME].copy()
+    metadata = dfs[BENCHMARK_METADATA_FILENAME].copy()
     required = {
         "benchmark", "source_file", "score_column", "scale",
         "random_baseline", "score_ceiling", "release_date",
     }
     missing = required - set(metadata.columns)
     if missing:
-        raise ValueError(f"{METADATA_FILENAME} is missing columns: {sorted(missing)}")
+        raise ValueError(f"{BENCHMARK_METADATA_FILENAME} is missing columns: {sorted(missing)}")
     if "superseded_by" not in metadata.columns:
         metadata["superseded_by"] = pd.NA
     # Rows with in_eci false describe benchmarks the site displays but the
@@ -100,19 +103,23 @@ def load_benchmark_metadata(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
     return metadata
 
 
-def load_model_table(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Return the model version -> model group table shipped in the zip."""
-    if MODEL_TABLE_FILENAME not in dfs:
+def load_model_metadata(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Return the model version table shipped in the zip.
+
+    Guarantees the model_version, model_group, and date columns the loader
+    needs; any additional display/analysis columns are passed through.
+    """
+    if MODEL_METADATA_FILENAME not in dfs:
         raise ValueError(
-            f"{MODEL_TABLE_FILENAME} not found in the benchmark data. The zip "
-            f"at {BENCHMARK_DATA_URL} ships this table; pass model_table= to "
-            f"override."
+            f"{MODEL_METADATA_FILENAME} not found in the benchmark data. The "
+            f"zip at {BENCHMARK_DATA_URL} ships this table; pass "
+            f"model_metadata= to override."
         )
-    table = dfs[MODEL_TABLE_FILENAME].copy()
+    table = dfs[MODEL_METADATA_FILENAME].copy()
     required = {"model_version", "model_group", "date"}
     missing = required - set(table.columns)
     if missing:
-        raise ValueError(f"{MODEL_TABLE_FILENAME} is missing columns: {sorted(missing)}")
+        raise ValueError(f"{MODEL_METADATA_FILENAME} is missing columns: {sorted(missing)}")
     table["date"] = pd.to_datetime(table["date"], errors="coerce")
     return table.dropna(subset=["model_version"])
 
@@ -120,7 +127,7 @@ def load_model_table(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
 def get_all_benchmark_names(
     source: str | Path = BENCHMARK_DATA_URL,
     cache_dir: Optional[Path] = None,
-    metadata: Optional[pd.DataFrame] = None,
+    benchmark_metadata: Optional[pd.DataFrame] = None,
 ) -> set[str]:
     """
     Get the names of all benchmarks available to the fit.
@@ -128,9 +135,9 @@ def get_all_benchmark_names(
     Returns:
         Set of in-ECI benchmark names from the benchmark metadata.
     """
-    if metadata is None:
-        metadata = load_benchmark_metadata(download_benchmark_data(source, cache_dir))
-    return set(metadata.loc[metadata["in_eci"], "benchmark"])
+    if benchmark_metadata is None:
+        benchmark_metadata = load_benchmark_metadata(download_benchmark_data(source, cache_dir))
+    return set(benchmark_metadata.loc[benchmark_metadata["in_eci"], "benchmark"])
 
 
 def _load_scores(dfs: dict[str, pd.DataFrame], metadata: pd.DataFrame) -> pd.DataFrame:
@@ -180,8 +187,8 @@ def prepare_benchmark_data(
     include_benchmarks: Optional[set[str]] = None,
     exclude_benchmarks: Optional[set[str]] = None,
     extra_scores: Optional[pd.DataFrame] = None,
-    metadata: Optional[pd.DataFrame] = None,
-    model_table: Optional[pd.DataFrame] = None,
+    benchmark_metadata: Optional[pd.DataFrame] = None,
+    model_metadata: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Load and process benchmark data for ECI fitting.
@@ -189,7 +196,7 @@ def prepare_benchmark_data(
     1. Load per-benchmark scores as directed by benchmark_metadata.csv
     2. Normalize with each benchmark's random baseline and score ceiling,
        clipping out-of-range scores into [0, 1]
-    3. Map model versions to model groups via eci_model_versions.csv
+    3. Map model versions to model groups via model_metadata.csv
     4. Drop rows dated before min_date
     5. Apply benchmark supersession (e.g. FrontierMath v2 replaces v1
        tier-for-tier where a group has both)
@@ -207,10 +214,10 @@ def prepare_benchmark_data(
         extra_scores: Optional additional score rows (model_version, benchmark,
             performance, source) with raw scores, normalized here like rows
             from the benchmark's source file. Model versions absent from the
-            model table are treated as their own group dated today. Used by
+            model metadata are treated as their own group dated today. Used by
             Epoch's pipeline for staging (pre-release) models.
-        metadata: Optional benchmark metadata table overriding the zip's copy.
-        model_table: Optional model version table overriding the zip's copy.
+        benchmark_metadata: Optional benchmark table overriding the zip's copy.
+        model_metadata: Optional model version table overriding the zip's copy.
 
     Returns:
         DataFrame with one row per (model group, benchmark)
@@ -226,18 +233,21 @@ def prepare_benchmark_data(
         )
 
     dfs = download_benchmark_data(source, cache_dir)
-    if metadata is None:
+    if benchmark_metadata is None:
         metadata = load_benchmark_metadata(dfs)
     else:
-        metadata = metadata.copy()
+        metadata = benchmark_metadata.copy()
         if "in_eci" not in metadata.columns:
             metadata["in_eci"] = True
     metadata = metadata[metadata["in_eci"].fillna(True).astype(bool)]
-    if model_table is None:
-        model_table = load_model_table(dfs)
+    if model_metadata is None:
+        model_metadata = load_model_metadata(dfs)
     else:
-        model_table = model_table.copy()
-        model_table["date"] = pd.to_datetime(model_table["date"], errors="coerce")
+        model_metadata = model_metadata.copy()
+        model_metadata["date"] = pd.to_datetime(model_metadata["date"], errors="coerce")
+    # Only the mapping columns take part in the fit; display/analysis columns
+    # must not collide with score columns downstream.
+    model_table = model_metadata[["model_version", "model_group", "date"]]
 
     all_benchmarks = set(metadata["benchmark"])
     for names, label in ((include_benchmarks, "include_benchmarks"),
@@ -280,7 +290,7 @@ def prepare_benchmark_data(
             [scores, extra[["model_version", "benchmark", "performance", "source"]]],
             ignore_index=True,
         )
-        # Versions the model table doesn't know become their own group,
+        # Versions the model metadata doesn't know become their own group,
         # dated today so no date filter can drop them.
         missing = set(extra["model_version"]) - set(model_table["model_version"])
         if missing:

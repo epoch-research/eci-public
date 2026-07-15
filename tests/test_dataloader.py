@@ -4,7 +4,7 @@ Tests for the metadata-driven dataloader.
 Synthetic tests build a small benchmark_data.zip in-process and verify each
 loading rule. Live tests download the published zip and require its output
 to match the published eci_benchmarks.csv exactly (they skip while the zip
-does not yet ship benchmark_metadata.csv / eci_model_versions.csv).
+does not yet ship benchmark_metadata.csv / model_metadata.csv).
 """
 
 import zipfile
@@ -14,8 +14,8 @@ import pandas as pd
 import pytest
 
 from eci.dataloader import (
-    METADATA_FILENAME,
-    MODEL_TABLE_FILENAME,
+    BENCHMARK_METADATA_FILENAME,
+    MODEL_METADATA_FILENAME,
     download_benchmark_data,
     get_all_benchmark_names,
     prepare_benchmark_data,
@@ -49,14 +49,16 @@ METADATA = pd.DataFrame([
             "random_baseline", "score_ceiling", "release_date", "superseded_by",
             "in_eci"])
 
-MODEL_TABLE = pd.DataFrame([
-    ("v1", "Group One", "2024-01-01"),
-    ("v1b", "Group One", "2024-06-01"),
-    ("v2", "Group Two", "2023-05-01"),
-    ("v-mix-old", "Mixed", "2022-05-01"),
-    ("v-mix-new", "Mixed", "2024-03-01"),
-    ("v-nodate", "No Date", None),
-], columns=["model_version", "model_group", "date"])
+# The organization column stands in for the optional display/analysis
+# columns model_metadata.csv carries beyond the three the loader uses.
+MODEL_METADATA = pd.DataFrame([
+    ("v1", "Group One", "2024-01-01", "Lab A"),
+    ("v1b", "Group One", "2024-06-01", "Lab A"),
+    ("v2", "Group Two", "2023-05-01", "Lab B"),
+    ("v-mix-old", "Mixed", "2022-05-01", "Lab C"),
+    ("v-mix-new", "Mixed", "2024-03-01", "Lab C"),
+    ("v-nodate", "No Date", None, "Lab D"),
+], columns=["model_version", "model_group", "date", "organization"])
 
 SOURCE_FILES = {
     "alpha.csv": pd.DataFrame({
@@ -90,8 +92,8 @@ def synthetic_zip(tmp_path_factory):
     with zipfile.ZipFile(path, "w") as zf:
         for name, df in SOURCE_FILES.items():
             zf.writestr(name, df.to_csv(index=False))
-        zf.writestr(METADATA_FILENAME, METADATA.to_csv(index=False))
-        zf.writestr(MODEL_TABLE_FILENAME, MODEL_TABLE.to_csv(index=False))
+        zf.writestr(BENCHMARK_METADATA_FILENAME, METADATA.to_csv(index=False))
+        zf.writestr(MODEL_METADATA_FILENAME, MODEL_METADATA.to_csv(index=False))
     return path
 
 
@@ -253,26 +255,26 @@ class TestMissingTables:
         with zipfile.ZipFile(path, "w") as zf:
             for name, df in SOURCE_FILES.items():
                 zf.writestr(name, df.to_csv(index=False))
-            if METADATA_FILENAME not in omit:
-                zf.writestr(METADATA_FILENAME, METADATA.to_csv(index=False))
-            if MODEL_TABLE_FILENAME not in omit:
-                zf.writestr(MODEL_TABLE_FILENAME, MODEL_TABLE.to_csv(index=False))
+            if BENCHMARK_METADATA_FILENAME not in omit:
+                zf.writestr(BENCHMARK_METADATA_FILENAME, METADATA.to_csv(index=False))
+            if MODEL_METADATA_FILENAME not in omit:
+                zf.writestr(MODEL_METADATA_FILENAME, MODEL_METADATA.to_csv(index=False))
         return path
 
-    def test_missing_config_raises(self, tmp_path):
-        with pytest.raises(ValueError, match=METADATA_FILENAME):
-            prepare_benchmark_data(self._zip_without(tmp_path, METADATA_FILENAME))
+    def test_missing_benchmark_metadata_raises(self, tmp_path):
+        with pytest.raises(ValueError, match=BENCHMARK_METADATA_FILENAME):
+            prepare_benchmark_data(self._zip_without(tmp_path, BENCHMARK_METADATA_FILENAME))
 
-    def test_missing_model_table_raises(self, tmp_path):
-        with pytest.raises(ValueError, match=MODEL_TABLE_FILENAME):
-            prepare_benchmark_data(self._zip_without(tmp_path, MODEL_TABLE_FILENAME))
+    def test_missing_model_metadata_raises(self, tmp_path):
+        with pytest.raises(ValueError, match=MODEL_METADATA_FILENAME):
+            prepare_benchmark_data(self._zip_without(tmp_path, MODEL_METADATA_FILENAME))
 
     def test_overrides_stand_in_for_zip_tables(self, tmp_path):
-        path = self._zip_without(tmp_path, METADATA_FILENAME, MODEL_TABLE_FILENAME)
+        path = self._zip_without(tmp_path, BENCHMARK_METADATA_FILENAME, MODEL_METADATA_FILENAME)
         with pytest.warns(UserWarning, match="Ghost"):
             out = prepare_benchmark_data(
                 path, min_benchmarks_per_model=2,
-                metadata=METADATA, model_table=MODEL_TABLE,
+                benchmark_metadata=METADATA, model_metadata=MODEL_METADATA,
             )
         assert len(out) > 0
 
@@ -284,10 +286,10 @@ class TestMissingTables:
 @pytest.fixture(scope="module")
 def live_output():
     dfs = download_benchmark_data(cache_dir=Path(".cache"))
-    if METADATA_FILENAME not in dfs or MODEL_TABLE_FILENAME not in dfs:
+    if BENCHMARK_METADATA_FILENAME not in dfs or MODEL_METADATA_FILENAME not in dfs:
         pytest.skip(
             "published benchmark_data.zip does not ship "
-            f"{METADATA_FILENAME} / {MODEL_TABLE_FILENAME} yet"
+            f"{BENCHMARK_METADATA_FILENAME} / {MODEL_METADATA_FILENAME} yet"
         )
     return prepare_benchmark_data(cache_dir=Path(".cache"))
 
