@@ -10,6 +10,8 @@ jobs:
   sync:
     if: github.repository == 'epoch-research/eci-internal'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,10 +20,20 @@ jobs:
           fetch-depth: 0  # Full history for proper sync
           persist-credentials: false  # Don't override our custom credentials
 
+      - name: Create repository-scoped writer token
+        id: automations-writer-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: 4497189
+          private-key: ${{ secrets.EPOCH_AUTOMATIONS_WRITER_PRIVATE_KEY }}
+          owner: epoch-research
+          repositories: eci-public
+          permission-contents: write
+
       - name: Push to public repository
         env:
-          PUBLIC_REPO_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+          EPOCH_AUTOMATIONS_WRITER_TOKEN: ${{ steps.automations-writer-token.outputs.token }}
         run: |
-          git config --global url."https://x-access-token:${PUBLIC_REPO_TOKEN}@github.com/".insteadOf "https://github.com/"
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$EPOCH_AUTOMATIONS_WRITER_TOKEN" | base64 -w0)"
           git remote add public https://github.com/epoch-research/eci-public.git
-          git push public main:main
+          git -c http.https://github.com/.extraheader="$auth_header" push public main:main
