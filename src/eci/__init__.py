@@ -7,12 +7,19 @@ and benchmark discriminabilities (how sharply scores rise with capability).
 """
 
 from .fitting import fit_eci_model, load_benchmark_data
-from .dataloader import prepare_benchmark_data, download_benchmark_data
+from .dataloader import (
+    prepare_benchmark_data,
+    download_benchmark_data,
+    load_benchmark_metadata,
+    load_model_metadata,
+)
 
 __all__ = [
     "fit_eci_model",
     "load_benchmark_data",
     "prepare_benchmark_data",
     "download_benchmark_data",
+    "load_benchmark_metadata",
+    "load_model_metadata",
 ]
 __version__ = "0.2.0"
