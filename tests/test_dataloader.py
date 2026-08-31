@@ -197,6 +197,22 @@ class TestExtraScores:
         assert row["performance"] == pytest.approx((0.85 - 0.25) / 0.75)
         assert _row(out, "stage-v", "Beta")["performance"] == pytest.approx(0.5)
 
+    def test_extra_scores_undated_known_version_is_dated_today(self, synthetic_zip):
+        # A staging model can already exist in the model metadata with its
+        # dates unset; its rows (including ones read from the zip) must be
+        # dated today rather than dropped by the date filter.
+        extra = pd.DataFrame({
+            "model_version": ["v-nodate", "v-nodate"],
+            "benchmark": ["Beta", "Gamma"],
+            "performance": [45.0, 0.6],
+        })
+        out = prepare_benchmark_data(
+            synthetic_zip, min_benchmarks_per_model=2, extra_scores=extra,
+        )
+        rows = out[out["model"] == "No Date"]
+        assert set(rows["benchmark"]) == {"Alpha", "Beta", "Gamma"}
+        assert (rows["date"] == pd.Timestamp.now().normalize()).all()
+
     def test_extra_scores_unknown_benchmark_warns(self, synthetic_zip):
         extra = pd.DataFrame({
             "model_version": ["stage-v"] * 2,

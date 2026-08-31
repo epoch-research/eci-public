@@ -291,13 +291,19 @@ def prepare_benchmark_data(
             ignore_index=True,
         )
         # Versions the model metadata doesn't know become their own group,
-        # dated today so no date filter can drop them.
+        # and known versions with no date (e.g. a staging model already in
+        # Airtable with its dates unset) keep their group; both are dated
+        # today so no date filter can drop them.
+        today = pd.Timestamp.now().normalize()
+        undated = (model_table["model_version"].isin(set(extra["model_version"]))
+                   & model_table["date"].isna())
+        model_table.loc[undated, "date"] = today
         missing = set(extra["model_version"]) - set(model_table["model_version"])
         if missing:
             model_table = pd.concat([model_table, pd.DataFrame({
                 "model_version": sorted(missing),
                 "model_group": sorted(missing),
-                "date": pd.Timestamp.now().normalize(),
+                "date": today,
             })], ignore_index=True)
 
     # Sub-baseline scores clip up to 0, above-ceiling scores clip down to 1;
