@@ -3,10 +3,10 @@ Tests for the metadata-driven dataloader.
 
 Synthetic tests build a small benchmark_data.zip in-process and verify each
 loading rule. Live tests download the published zip and require its output
-to match the published eci_benchmarks.csv exactly (they skip while the zip
-does not yet ship benchmark_metadata.csv / model_metadata.csv).
+to match the published fit input (processed_data_for_eci.csv) exactly.
 """
 
+import urllib.error
 import zipfile
 from pathlib import Path
 
@@ -21,15 +21,9 @@ from eci.dataloader import (
     prepare_benchmark_data,
 )
 
-# Benchmarks whose raw files are not yet published in benchmark_data.zip.
-# Publishing them is an open decision; anything beyond this set is a bug.
-KNOWN_UNPUBLISHED = {
-    "FrontierMath-Tiers-1-3-v2-Private",
-    "FrontierMath-Tier-4-v2-Private",
-    "EBR-bench",
-}
-
-EXPECTED_URL = "https://epoch.ai/data/eci_benchmarks.csv"
+EXPECTED_URL = "https://epoch.ai/data/processed_data_for_eci.csv"
+# Name of the same file before epoch-website-astro#1435; drop once that ships
+LEGACY_EXPECTED_URL = "https://epoch.ai/data/eci_benchmarks.csv"
 
 
 #########################
@@ -94,6 +88,11 @@ def synthetic_zip(tmp_path_factory):
             zf.writestr(name, df.to_csv(index=False))
         zf.writestr(BENCHMARK_METADATA_FILENAME, METADATA.to_csv(index=False))
         zf.writestr(MODEL_METADATA_FILENAME, MODEL_METADATA.to_csv(index=False))
+        # ECI outputs shipped alongside the raw data (old and new folder names)
+        zf.writestr("additional_eci_data/eci_scores.csv", "Model,eci\nA1,100\n")
+        zf.writestr("epoch_capabilities_index/eci_scores.csv", "Model,eci\nA1,100\n")
+        zf.writestr("epoch_capabilities_index/eci_bootstraps.json", "{}")
+        zf.writestr("README.md", "raw benchmark data")
     return path
 
 
@@ -114,6 +113,10 @@ def _row(df, model, benchmark):
 #########################
 
 class TestLoading:
+    def test_only_raw_csvs_are_extracted(self, synthetic_zip):
+        dfs = download_benchmark_data(synthetic_zip)
+        assert set(dfs) == set(SOURCE_FILES) | {BENCHMARK_METADATA_FILENAME, MODEL_METADATA_FILENAME}
+
     def test_output_schema(self, loaded):
         assert list(loaded.columns) == [
             "model_id", "benchmark_id", "performance", "benchmark",
@@ -301,40 +304,38 @@ class TestMissingTables:
 
 @pytest.fixture(scope="module")
 def live_output():
-    dfs = download_benchmark_data(cache_dir=Path(".cache"))
-    if BENCHMARK_METADATA_FILENAME not in dfs or MODEL_METADATA_FILENAME not in dfs:
-        pytest.skip(
-            "published benchmark_data.zip does not ship "
-            f"{BENCHMARK_METADATA_FILENAME} / {MODEL_METADATA_FILENAME} yet"
-        )
     return prepare_benchmark_data(cache_dir=Path(".cache"))
 
 
 @pytest.fixture(scope="module")
 def expected():
-    df = pd.read_csv(EXPECTED_URL)
+    try:
+        df = pd.read_csv(EXPECTED_URL)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        df = pd.read_csv(LEGACY_EXPECTED_URL)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     return df
 
 
 class TestLiveEquivalence:
-    """The published zip must reproduce the published eci_benchmarks.csv."""
+    """The published zip must reproduce the published fit input."""
+
+    def test_columns_match_exactly(self, live_output, expected):
+        assert list(live_output.columns) == list(expected.columns)
 
     def test_models_match_exactly(self, live_output, expected):
         assert set(live_output["model"]) == set(expected["model"])
 
-    def test_benchmark_gaps_are_known(self, live_output, expected):
-        missing = set(expected["benchmark"]) - set(live_output["benchmark"])
-        assert missing <= KNOWN_UNPUBLISHED, (
-            f"new unpublished benchmarks: {missing - KNOWN_UNPUBLISHED}"
-        )
-        assert set(live_output["benchmark"]) <= set(expected["benchmark"])
+    def test_benchmarks_match_exactly(self, live_output, expected):
+        assert set(live_output["benchmark"]) == set(expected["benchmark"])
 
     def test_performance_matches_exactly(self, live_output, expected):
         merged = live_output.merge(
             expected, on=["model", "benchmark"], suffixes=("_new", "_live"),
         )
-        assert len(merged) > 0.9 * len(live_output)
+        assert len(merged) == len(live_output) == len(expected)
         diff = (merged["performance_new"] - merged["performance_live"]).abs()
         assert (diff < 1e-9).all(), (
             merged.loc[diff >= 1e-9, ["model", "benchmark",

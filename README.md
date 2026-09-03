@@ -25,11 +25,19 @@ pip install -e .
 
 ## Usage
 
+The fit runs from Epoch's raw benchmark data,
+[benchmark_data.zip](https://epoch.ai/data/benchmark_data.zip), which the
+loader downloads and processes into one row per model x benchmark (see
+`src/eci/dataloader.py`).
+
 ### Command Line
 
 ```bash
-# Fit model and save results to outputs/
+# Download benchmark_data.zip, fit model and save results to outputs/
 python scripts/fit_eci.py
+
+# Fit from a local copy of the zip
+python scripts/fit_eci.py --input path/to/benchmark_data.zip
 
 # With fewer bootstrap samples for a quicker run
 python scripts/fit_eci.py --bootstrap-samples 100
@@ -41,9 +49,9 @@ python scripts/fit_eci.py --numeric-jacobian
 ### Python API
 
 ```python
-from eci import load_benchmark_data, fit_eci_model
+from eci import prepare_benchmark_data, fit_eci_model
 
-df = load_benchmark_data("https://epoch.ai/data/eci_benchmarks.csv")
+df = prepare_benchmark_data()  # downloads benchmark_data.zip
 eci_df, edi_df, draws = fit_eci_model(df, bootstrap_samples=100)
 
 print(eci_df[["Model", "eci", "eci_ci_low", "eci_ci_high"]].head(10))
