@@ -6,7 +6,6 @@ loading rule. Live tests download the published zip and require its output
 to match the published fit input (processed_data_for_eci.csv) exactly.
 """
 
-import urllib.error
 import zipfile
 from pathlib import Path
 
@@ -22,8 +21,6 @@ from eci.dataloader import (
 )
 
 EXPECTED_URL = "https://epoch.ai/data/processed_data_for_eci.csv"
-# Name of the same file before epoch-website-astro#1435; drop once that ships
-LEGACY_EXPECTED_URL = "https://epoch.ai/data/eci_benchmarks.csv"
 
 
 #########################
@@ -309,12 +306,7 @@ def live_output():
 
 @pytest.fixture(scope="module")
 def expected():
-    try:
-        df = pd.read_csv(EXPECTED_URL)
-    except urllib.error.HTTPError as e:
-        if e.code != 404:
-            raise
-        df = pd.read_csv(LEGACY_EXPECTED_URL)
+    df = pd.read_csv(EXPECTED_URL)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     return df
 

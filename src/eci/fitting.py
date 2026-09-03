@@ -114,26 +114,6 @@ def _irt_jacobian(
     return jac.tocsr()
 
 
-def load_benchmark_data(path: str) -> pd.DataFrame:
-    """Load fit-input benchmark data from a CSV path or URL.
-
-    The CSV is expected in the format returned by prepare_benchmark_data,
-    e.g. a saved copy of an earlier run's input.
-
-    Model names are taken from the CSV's "model" column, which names each
-    release-dated model aggregation. (The CSV's own "Model" column holds the
-    coarser model family, which can span several aggregations and can be
-    empty; it is replaced here.)
-    """
-    df = pd.read_csv(path)
-    required_cols = ["model_id", "benchmark_id", "performance", "benchmark", "model"]
-    missing = set(required_cols) - set(df.columns)
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-    df["Model"] = df["model"]
-    return df
-
-
 def fit_eci_model(
     df: pd.DataFrame,
     anchor_benchmark: str = DEFAULT_ANCHOR_BENCHMARK,
