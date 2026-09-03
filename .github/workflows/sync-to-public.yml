@@ -6,6 +6,9 @@ on:
       - main
   workflow_dispatch:  # Allow manual trigger
 
+permissions:
+  contents: read
+
 jobs:
   sync:
     if: github.repository == 'epoch-research/eci-internal'
