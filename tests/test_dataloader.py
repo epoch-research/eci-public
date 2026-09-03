@@ -85,8 +85,7 @@ def synthetic_zip(tmp_path_factory):
             zf.writestr(name, df.to_csv(index=False))
         zf.writestr(BENCHMARK_METADATA_FILENAME, METADATA.to_csv(index=False))
         zf.writestr(MODEL_METADATA_FILENAME, MODEL_METADATA.to_csv(index=False))
-        # ECI outputs shipped alongside the raw data (old and new folder names)
-        zf.writestr("additional_eci_data/eci_scores.csv", "Model,eci\nA1,100\n")
+        # ECI outputs shipped alongside the raw data
         zf.writestr("epoch_capabilities_index/eci_scores.csv", "Model,eci\nA1,100\n")
         zf.writestr("epoch_capabilities_index/eci_bootstraps.json", "{}")
         zf.writestr("README.md", "raw benchmark data")
