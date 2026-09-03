@@ -7,8 +7,6 @@ and verify that the fitted scores match:
 - https://epoch.ai/data/edi_scores.csv (benchmark difficulties)
 """
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -30,7 +28,7 @@ EDI_TOLERANCE = 0.1  # EDI points
 @pytest.fixture(scope="module")
 def benchmark_data():
     """Prepare benchmark performance data from the published zip."""
-    return prepare_benchmark_data(cache_dir=Path(".cache"))
+    return prepare_benchmark_data()
 
 
 @pytest.fixture(scope="module")
