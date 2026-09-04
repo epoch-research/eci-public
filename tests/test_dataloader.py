@@ -7,7 +7,6 @@ to match the published fit input (processed_data_for_eci.csv) exactly.
 """
 
 import zipfile
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -300,7 +299,7 @@ class TestMissingTables:
 
 @pytest.fixture(scope="module")
 def live_output():
-    return prepare_benchmark_data(cache_dir=Path(".cache"))
+    return prepare_benchmark_data()
 
 
 @pytest.fixture(scope="module")
