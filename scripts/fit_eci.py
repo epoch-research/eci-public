@@ -4,7 +4,7 @@ Fit ECI model and save scores to outputs directory.
 
 Usage:
     python scripts/fit_eci.py
-    python scripts/fit_eci.py --input path/to/benchmarks.csv
+    python scripts/fit_eci.py --input path/to/benchmark_data.zip
     python scripts/fit_eci.py --bootstrap-samples 200
     python scripts/fit_eci.py --numeric-jacobian
 """
@@ -14,10 +14,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from eci import load_benchmark_data, fit_eci_model
+from eci import fit_eci_model, prepare_benchmark_data
+from eci.dataloader import BENCHMARK_DATA_URL
 
 
-DEFAULT_INPUT_URL = "https://epoch.ai/data/eci_benchmarks.csv"
 OUTPUT_DIR = Path(__file__).parent.parent / "outputs"
 
 # Input columns carried over to the ECI output when present (the fit itself
@@ -38,8 +38,8 @@ def main():
     parser = argparse.ArgumentParser(description="Fit ECI model and save scores")
     parser.add_argument(
         "--input",
-        default=DEFAULT_INPUT_URL,
-        help=f"Path or URL to benchmark data CSV (default: {DEFAULT_INPUT_URL})",
+        default=BENCHMARK_DATA_URL,
+        help=f"Path or URL of benchmark_data.zip (default: {BENCHMARK_DATA_URL})",
     )
     parser.add_argument(
         "--bootstrap-samples",
@@ -60,8 +60,8 @@ def main():
     )
     args = parser.parse_args()
 
-    print(f"Loading benchmark data from {args.input}...")
-    df = load_benchmark_data(args.input)
+    print(f"Preparing benchmark data from {args.input}...")
+    df = prepare_benchmark_data(args.input)
     print(f"  Loaded {len(df)} performance records")
     print(f"  {df['model_id'].nunique()} models, {df['benchmark_id'].nunique()} benchmarks")
 

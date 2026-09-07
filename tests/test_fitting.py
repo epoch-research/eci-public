@@ -1,7 +1,7 @@
 """
 Tests for ECI fitting that verify outputs match the Epoch AI website.
 
-These tests load benchmark data from https://epoch.ai/data/eci_benchmarks.csv
+These tests prepare benchmark data from https://epoch.ai/data/benchmark_data.zip
 and verify that the fitted scores match:
 - https://epoch.ai/data/eci_scores.csv (model capabilities)
 - https://epoch.ai/data/edi_scores.csv (benchmark difficulties)
@@ -12,12 +12,11 @@ import pandas as pd
 import pytest
 from scipy.stats import spearmanr
 
-from eci import fit_eci_model, load_benchmark_data
+from eci import fit_eci_model, prepare_benchmark_data
 from eci.fitting import _affine_map, _irt_jacobian
 
 
 # URLs for test data
-BENCHMARKS_URL = "https://epoch.ai/data/eci_benchmarks.csv"
 EXPECTED_ECI_URL = "https://epoch.ai/data/eci_scores.csv"
 EXPECTED_EDI_URL = "https://epoch.ai/data/edi_scores.csv"
 
@@ -28,8 +27,8 @@ EDI_TOLERANCE = 0.1  # EDI points
 
 @pytest.fixture(scope="module")
 def benchmark_data():
-    """Load benchmark performance data."""
-    return load_benchmark_data(BENCHMARKS_URL)
+    """Prepare benchmark performance data from the published zip."""
+    return prepare_benchmark_data()
 
 
 @pytest.fixture(scope="module")
@@ -54,8 +53,8 @@ def expected_edi():
 class TestDataLoading:
     """Tests for data loading functionality."""
 
-    def test_load_benchmark_data(self, benchmark_data):
-        """Test that benchmark data loads correctly."""
+    def test_benchmark_data_columns(self, benchmark_data):
+        """Test that prepared benchmark data has the fit-input columns."""
         assert len(benchmark_data) > 0
         assert "model_id" in benchmark_data.columns
         assert "benchmark_id" in benchmark_data.columns

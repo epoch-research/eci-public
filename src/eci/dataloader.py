@@ -67,10 +67,10 @@ def download_benchmark_data(source: str | Path = BENCHMARK_DATA_URL, cache_dir: 
 
 
 def _extract_csvs(zf: zipfile.ZipFile) -> dict[str, pd.DataFrame]:
-    """Extract CSV files from zipfile into DataFrames."""
+    """Extract CSV files from zipfile into DataFrames (other files are ignored)."""
     dfs = {}
     for name in zf.namelist():
-        if name.endswith(".csv") and not name.startswith("additional_eci_data/"):
+        if name.endswith(".csv") and not name.startswith("epoch_capabilities_index/"):
             with zf.open(name) as f:
                 basename = Path(name).name
                 dfs[basename] = pd.read_csv(f)
