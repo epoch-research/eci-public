@@ -169,15 +169,40 @@ alongside a `summary.txt` and a four-page `evaluation_report.pdf`:
 
 | Table | What it tells you |
 | --- | --- |
+| **`metrics`** | **Every headline number, flat — read this one first** |
 | `sampler_summary`, `sampler_parameters` | Did NUTS work? Divergences, r-hat, ESS (bulk and tail), MCSE, BFMI |
-| `accuracy` | RMSE, MAE and bias per benchmark, in-sample and leave-one-out weighted |
+| `accuracy` | Per benchmark: bias, the predictive SD the model claims, and `rmse_ratio` |
 | `loo_summary`, `loo_observations` | `elpd_loo`, `p_loo`, and the Pareto k of every observation |
 | `ppc` | Posterior predictive p-values for mean, sd, variance, IQR, min, max, skew and tail shares |
 | `calibration`, `pit` | PIT per observation, coverage against nominal, KS test of uniformity |
 | `qq` | Arrays for the PIT-uniform and score QQ plots |
 
-Two things to know before reading the numbers:
+The PDF is only those two QQ plots — they show something a table cannot,
+namely *where* on the score scale the fit departs from the data. Everything
+else is a number and lives in `metrics.csv`.
 
+Four things to know before reading the numbers:
+
+- **Per-benchmark RMSE is not reported, and should not be.** It is a
+  restatement of `kappa`, which the fit already gives you: on the published
+  data a benchmark's RMSE regresses on the predictive SD the model itself
+  claims with R² = 0.93, and ranks against `kappa` at spearman −0.92. A
+  high-RMSE benchmark is not one the fit handles badly, it is one the fit
+  already knows is noisy. `rmse_ratio` — observed RMSE over the SD the model
+  claims — asks the question that isn't already answered: near 1 the
+  benchmark scatters as much as the model says, below 1 the model reserves
+  more spread than it needs. It ranks benchmarks differently; only 2 of the
+  top 5 coincide with raw RMSE.
+
+- **`performance_clip_eps` is a modelling choice, not a tolerance.** The Beta
+  has no density at exactly 0 or 1, so boundary scores are clipped to
+  `[eps, 1-eps]` — default `1e-4`. Most boundary rows fit a shape parameter
+  `mu*kappa < 1`, where the density *diverges* as the value goes to 0, so a
+  smaller eps hands the likelihood an unbounded reward for pushing those rows
+  down; the model pays by lowering the capability of the models involved and
+  the `kappa` of the benchmarks carrying the zeros. Going to `1e-6` buys 0.03
+  of squared error at the 82 exact zeros and adds 0.24 across the 2457-row
+  bulk. ELPD is not comparable across different eps.
 - **Accuracy is scored against the raw scores, the distributional checks
   against the clipped ones.** The Beta likelihood is never shown a score of
   exactly 0 or 1, so it cannot be asked to have predicted one; scoring the PIT

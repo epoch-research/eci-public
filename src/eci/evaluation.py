@@ -78,6 +78,65 @@ PARETO_K_BANDS = ((0.5, "good"), (0.7, "ok"), (1.0, "bad"))
 
 _OVERALL = "OVERALL"
 
+# How to read each metric: which direction is good, and what value would mean
+# the model is right. Blank where the number is context rather than a verdict.
+METRIC_GUIDANCE = {
+    # data
+    "n_obs_clipped": "rows the Beta cannot see",
+    # sampling
+    "divergences": "0 ideal; any is a warning",
+    "divergence_rate": "0 ideal",
+    "max_r_hat": "lower; <= 1.01",
+    "n_r_hat_above_1.01": "0 ideal",
+    "min_ess_bulk": "higher; >= 400",
+    "min_ess_tail": "higher; >= 400",
+    "min_bfmi": "higher; > 0.3",
+    # accuracy
+    "rmse": "lower is better",
+    "mae": "lower is better",
+    "bias": "ideal 0",
+    "rmse_ratio_median": "ideal 1; < 1 = intervals over-wide",
+    "rmse_ratio_max": "ideal <= 1; > 1 = over-confident",
+    "rmse_loo": "lower; out-of-sample",
+    "mae_loo": "lower; out-of-sample",
+    # loo
+    "elpd_loo": "higher is better",
+    "elpd_loo_se": "SE of elpd_loo",
+    "p_loo": "effective parameters",
+    "max_pareto_k": "lower; < 0.7",
+    "pareto_k_good": "k <= 0.5; higher is better",
+    "pareto_k_ok": "0.5 < k <= 0.7; usable",
+    "pareto_k_bad": "0.7 < k <= 1; lower is better",
+    "pareto_k_very_bad": "k > 1; 0 ideal",
+    # calibration
+    "mean_pit": "ideal 0.5",
+    "ks_statistic": "lower is better",
+    "ks_pvalue": "low p = detectably non-uniform",
+    "coverage_0.5": "ideal 0.50",
+    "coverage_0.8": "ideal 0.80",
+    "coverage_0.9": "ideal 0.90",
+    "coverage_0.95": "ideal 0.95",
+    # posterior predictive
+    # Pooled checks are sensitive but unspecific: they mix the spread of the
+    # fitted curve (32% of total variance) with the scatter kappa governs
+    # (68%), and over 2,780 rows they flag biases far too small for any one
+    # benchmark to see. Read them as "something small is off", not as a verdict.
+    "ppp_mean": "ideal 0.5; pooled",
+    "ppp_sd": "pooled; kappa is judged per benchmark",
+    "ppp_variance": "pooled; kappa is judged per benchmark",
+    "ppp_iqr": "pooled; kappa is judged per benchmark",
+    "ppp_min": "meaningless; the clip pins it",
+    "ppp_max": "meaningless; the clip pins it",
+    "ppp_skew": "ideal 0.5; the Beta cannot flex its skew",
+    "ppp_frac_below_0.05": "ideal 0.5; pooled, so very sensitive",
+    "ppp_frac_above_0.95": "ideal 0.5; pooled, so very sensitive",
+    "ppp_variance_median": "ideal 0.5; this judges kappa",
+    "ppp_iqr_median": "ideal 0.5; this judges kappa",
+    "ppp_variance_n_outside": "lower is better",
+    "ppp_iqr_n_outside": "lower is better",
+    "n_checks_outside": "10% expected by chance",
+}
+
 
 def _thin(trace: az.InferenceData, max_draws: int) -> az.InferenceData:
     """Subsample the draw dimension so the per-observation arrays stay small,
@@ -192,19 +251,32 @@ def sampler_diagnostics(
 
 def predictive_accuracy(
     trace: az.InferenceData, df: pd.DataFrame, loo_weights: "np.ndarray | None" = None
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, dict]:
     """
     How closely does the fitted curve track the observed scores?
 
-    RMSE, MAE and bias of the posterior mean curve, per benchmark and overall.
-    When ``loo_weights`` (n_obs, n_draws) are supplied, the leave-one-out
-    weighted predictions are scored as well: those are out-of-sample, so the
-    gap between the two columns is the optimism of the in-sample fit.
+    Returns (per_benchmark, totals).
 
-    ``rmse_per_draw_ci_low``/``_high`` bound each individual draw's RMSE, and
-    are not an interval around ``rmse``: averaging the curve before scoring it
-    beats scoring each draw and averaging, so ``rmse`` normally sits below
-    that interval rather than inside it.
+    ``totals`` holds the headline errors: RMSE, MAE and bias of the posterior
+    mean curve, and - when ``loo_weights`` (n_obs, n_draws) are supplied - the
+    same scored on leave-one-out weighted predictions. Those are
+    out-of-sample, so the gap between the two is the optimism of the in-sample
+    fit.
+
+    ``per_benchmark`` deliberately does **not** carry raw RMSE. Per benchmark
+    that number is not a measure of fit: it is a restatement of ``kappa``,
+    which the fit already reports. Measured on the published data, a
+    benchmark's RMSE regresses on the predictive SD the model itself claims
+    with R^2 = 0.93, and ranks against ``kappa`` at spearman -0.92 - so
+    ranking benchmarks by RMSE just re-ranks them by the noise parameter the
+    model already estimated. A high-RMSE benchmark is not one the fit handles
+    badly; it is one the fit already knows is noisy.
+
+    What the ratio ``rmse_ratio = rmse / predicted_sd`` asks instead is
+    whether that noise estimate is *honest*: near 1 the benchmark scatters as
+    much as the model claims, below 1 the model reserves more spread than it
+    needs, above 1 it is over-confident there. It ranks benchmarks differently
+    from raw RMSE - on the published data only 2 of the top 5 coincide.
 
     Scored against the raw observed scores, not the clipped ones the
     likelihood sees, so the boundary rows are judged honestly.
@@ -213,28 +285,43 @@ def predictive_accuracy(
     y = _observed(df)  # raw: the error a user of the index would see
     mu_mean = mu.mean(axis=0)
     residual = mu_mean - y
+    # The spread the model claims per observation, averaged over draws. For
+    # Beta(mu*kappa, (1-mu)*kappa) that is mu(1-mu)/(kappa+1).
+    kappa = _flatten(trace.posterior["kappa"])[:, _positions(trace, df)[1]]
+    predictive_var = (mu * (1.0 - mu) / (kappa + 1.0)).mean(axis=0)
     loo_mu = (loo_weights * mu.T).sum(axis=1) if loo_weights is not None else None
+
+    def rmse(mask, prediction):
+        return float(np.sqrt(((prediction[mask] - y[mask]) ** 2).mean()))
 
     rows = []
     for name, mask in _groups(df):
-        draw_rmse = np.sqrt(((mu[:, mask] - y[mask]) ** 2).mean(axis=1))
-        row = {
+        if name == _OVERALL:
+            continue
+        predicted_sd = float(np.sqrt(predictive_var[mask].mean()))
+        rows.append({
             "benchmark": name,
             "n_obs": int(mask.sum()),
-            "rmse": float(np.sqrt((residual[mask] ** 2).mean())),
-            "mae": float(np.abs(residual[mask]).mean()),
-            "bias": float(residual[mask].mean()),
-            "rmse_per_draw_ci_low": float(np.quantile(draw_rmse, 0.05)),
-            "rmse_per_draw_ci_high": float(np.quantile(draw_rmse, 0.95)),
             "observed_mean": float(y[mask].mean()),
             "predicted_mean": float(mu_mean[mask].mean()),
-        }
-        if loo_mu is not None:
-            row["rmse_loo"] = float(np.sqrt(((loo_mu[mask] - y[mask]) ** 2).mean()))
-            row["mae_loo"] = float(np.abs(loo_mu[mask] - y[mask]).mean())
-        rows.append(row)
+            "bias": float(residual[mask].mean()),
+            "predicted_sd": predicted_sd,
+            "rmse_ratio": rmse(mask, mu_mean) / predicted_sd if predicted_sd else np.nan,
+        })
+    per_benchmark = pd.DataFrame(rows).sort_values("rmse_ratio", ascending=False)
 
-    return pd.DataFrame(rows)
+    everything = np.ones(len(df), dtype=bool)
+    totals = {
+        "rmse": rmse(everything, mu_mean),
+        "mae": float(np.abs(residual).mean()),
+        "bias": float(residual.mean()),
+        "rmse_ratio_median": float(per_benchmark["rmse_ratio"].median()),
+        "rmse_ratio_max": float(per_benchmark["rmse_ratio"].max()),
+    }
+    if loo_mu is not None:
+        totals["rmse_loo"] = rmse(everything, loo_mu)
+        totals["mae_loo"] = float(np.abs(loo_mu - y).mean())
+    return per_benchmark, totals
 
 
 def loo_diagnostics(
@@ -307,6 +394,14 @@ def posterior_predictive_checks(
     right; the tail statistics say whether the Beta reaches the extreme
     scores the benchmarks actually show.
 
+    Reported as mid-p values - ``P(T_rep > T_obs) + 0.5 * P(T_rep = T_obs)``.
+    The uncorrected ``P(T_rep >= T_obs)`` counts a tie as a disagreement,
+    which pins a statistic the model reproduces exactly at 1.0 instead of 0.5.
+    On the published data that alone accounted for 78 of 115 apparently
+    failing per-benchmark checks: every benchmark with no scores above 0.95
+    has ``T_obs = 0``, and ``P(T_rep >= 0) = 1`` no matter how the model
+    behaves.
+
     These p-values are conservative - the same data informed the posterior -
     so treat 0.05/0.95 as a flag to look closer, not as a test.
 
@@ -335,6 +430,14 @@ def posterior_predictive_checks(
         for stat_name, statistic in statistics.items():
             observed = float(statistic(y_b))
             replicated = np.asarray(statistic(rep_b), dtype=float)
+            # Mid-p: ties split evenly. Without it a statistic the model
+            # reproduces exactly scores 1.0 rather than 0.5, because
+            # P(T_rep >= T_obs) counts every tie as a disagreement. That
+            # matters for the discrete statistics: a benchmark with no scores
+            # above 0.95 has T_obs = 0, so P(T_rep >= 0) = 1 whatever the
+            # model does. For the continuous statistics exact ties are
+            # essentially impossible and this changes nothing.
+            ties = float((replicated == observed).mean())
             rows.append({
                 "benchmark": name,
                 "statistic": stat_name,
@@ -343,7 +446,7 @@ def posterior_predictive_checks(
                 "replicated_mean": float(replicated.mean()),
                 "replicated_ci_low": float(np.quantile(replicated, 0.05)),
                 "replicated_ci_high": float(np.quantile(replicated, 0.95)),
-                "ppp": float((replicated >= observed).mean()),
+                "ppp": float((replicated > observed).mean()) + 0.5 * ties,
             })
     return pd.DataFrame(rows)
 
@@ -437,7 +540,7 @@ def evaluate_fit(
     trace: az.InferenceData,
     df: pd.DataFrame,
     max_draws: int = 2000,
-    performance_clip_eps: float = 1e-3,
+    performance_clip_eps: float = 1e-4,
 ) -> dict:
     """
     Run the whole suite and return it as a dict of tables.
@@ -467,18 +570,70 @@ def evaluate_fit(
     thinned = _thin(trace, max_draws)
 
     loo_summary, loo_observations, weights = loo_diagnostics(thinned, df)
+    accuracy, totals = predictive_accuracy(thinned, df, loo_weights=weights)
     pit, coverage = calibration(thinned, df, clip_eps=performance_clip_eps)
-    return {
+    ppc = posterior_predictive_checks(thinned, df, clip_eps=performance_clip_eps)
+    results = {
         "sampler_summary": sampler_summary,
         "sampler_parameters": sampler_parameters,
-        "accuracy": predictive_accuracy(thinned, df, loo_weights=weights),
+        "accuracy": accuracy,
         "loo_summary": loo_summary,
         "loo_observations": loo_observations,
-        "ppc": posterior_predictive_checks(thinned, df, clip_eps=performance_clip_eps),
+        "ppc": ppc,
         "calibration": coverage,
         "pit": pit,
         "qq": qq_data(thinned, df, clip_eps=performance_clip_eps),
     }
+    results["metrics"] = _metrics_table(results, totals, df)
+    return results
+
+
+def _metrics_table(results: dict, totals: dict, df: pd.DataFrame) -> pd.DataFrame:
+    """Every headline number as one flat (section, metric, value) table.
+
+    This is the table to read first; the others break each section down.
+    """
+    sampler = results["sampler_summary"].iloc[0]
+    loo = results["loo_summary"].iloc[0]
+    coverage = _overall(results["calibration"])
+    ppc = results["ppc"]
+    pooled = ppc[ppc["benchmark"] == _OVERALL].set_index("statistic")["ppp"]
+    per_benchmark = ppc[
+        (ppc["benchmark"] != _OVERALL) & ~ppc["statistic"].isin(DEGENERATE_AT_BOUNDARY)
+    ]
+
+    rows = [
+        ("data", "n_obs", len(df)),
+        ("data", "n_models", df["Model"].nunique()),
+        ("data", "n_benchmarks", df["benchmark"].nunique()),
+        ("data", "n_obs_clipped", int(sampler["n_obs_clipped"])),
+    ]
+    rows += [("sampling", name, sampler[name]) for name in (
+        "n_chains", "n_draws", "divergences", "divergence_rate", "max_r_hat",
+        "n_r_hat_above_1.01", "n_parameters", "min_ess_bulk", "min_ess_tail", "min_bfmi",
+    ) if name in sampler]
+    rows += [("accuracy", name, value) for name, value in totals.items()]
+    # n_obs would collide with the data section; se is ambiguous on its own
+    rows += [("loo", "elpd_loo_se" if name == "se" else name, loo[name])
+             for name in loo.index if name != "n_obs"]
+    rows += [("calibration", name, coverage[name]) for name in coverage.index
+             if name not in ("benchmark", "n_obs")]
+    rows += [("ppc_pooled", f"ppp_{name}", value) for name, value in pooled.items()]
+    for statistic in ("variance", "iqr"):
+        values = per_benchmark.loc[per_benchmark["statistic"] == statistic, "ppp"]
+        rows.append(("ppc_per_benchmark", f"ppp_{statistic}_median", values.median()))
+        rows.append(("ppc_per_benchmark", f"ppp_{statistic}_n_outside",
+                     int(((values < 0.05) | (values > 0.95)).sum())))
+    rows.append(("ppc_per_benchmark", "n_checks", len(per_benchmark)))
+    rows.append(("ppc_per_benchmark", "n_checks_outside", int(
+        ((per_benchmark["ppp"] < 0.05) | (per_benchmark["ppp"] > 0.95)).sum())))
+
+    table = pd.DataFrame(rows, columns=["section", "metric", "value"])
+    table["guide"] = table["metric"].map(METRIC_GUIDANCE).fillna("")
+    duplicated = table.loc[table["metric"].duplicated(), "metric"].tolist()
+    if duplicated:  # names are the lookup key, so a collision is a bug
+        raise ValueError(f"duplicate metric names in the metrics table: {duplicated}")
+    return table
 
 
 def _overall(table: pd.DataFrame) -> pd.Series:
@@ -488,7 +643,7 @@ def _overall(table: pd.DataFrame) -> pd.Series:
 def summarise_evaluation(results: dict) -> str:
     """One screenful of the numbers worth reading first."""
     sampler = results["sampler_summary"].iloc[0]
-    accuracy = _overall(results["accuracy"])
+    metrics = results["metrics"].set_index("metric")["value"]
     loo = results["loo_summary"].iloc[0]
     coverage = _overall(results["calibration"])
     ppc = results["ppc"]
@@ -506,11 +661,15 @@ def summarise_evaluation(results: dict) -> str:
         "likelihood;\nthe distributional checks below are scored against the clipped values.",
         "",
         "Predictive accuracy (score units)",
-        f"  RMSE               {accuracy['rmse']:.4f}"
-        + (f"   LOO {accuracy['rmse_loo']:.4f}" if "rmse_loo" in accuracy else ""),
-        f"  MAE                {accuracy['mae']:.4f}"
-        + (f"   LOO {accuracy['mae_loo']:.4f}" if "mae_loo" in accuracy else ""),
-        f"  bias               {accuracy['bias']:+.4f}",
+        f"  RMSE               {metrics['rmse']:.4f}"
+        + (f"   LOO {metrics['rmse_loo']:.4f}" if "rmse_loo" in metrics else ""),
+        f"  MAE                {metrics['mae']:.4f}"
+        + (f"   LOO {metrics['mae_loo']:.4f}" if "mae_loo" in metrics else ""),
+        f"  bias               {metrics['bias']:+.4f}",
+        f"  RMSE / predicted SD, per benchmark: median "
+        f"{metrics['rmse_ratio_median']:.2f}, max {metrics['rmse_ratio_max']:.2f}",
+        "  (near 1 = the benchmark scatters as much as the model claims;",
+        "   below 1 = the model reserves more spread than it needs)",
         "",
         "Leave-one-out",
         f"  elpd_loo           {loo['elpd_loo']:.1f} +/- {loo['se']:.1f}",
@@ -561,8 +720,75 @@ def summarise_evaluation(results: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_value(value) -> str:
+    """Render a metric at a sensible precision for reading, not for parsing."""
+    number = float(value)
+    if number.is_integer() and abs(number) < 1e7:
+        return f"{int(number):,}"
+    magnitude = abs(number)
+    if magnitude >= 100:
+        return f"{number:,.1f}"
+    if magnitude >= 1:
+        return f"{number:.3f}"
+    if magnitude < 1e-4:  # only genuinely tiny values are worth scientific form
+        return f"{number:.2e}"
+    return f"{number:.4f}"
+
+
+# Headings for the metrics page, in the order the sections are laid out.
+_SECTION_TITLES = {
+    "data": "Data",
+    "sampling": "Sampling",
+    "accuracy": "Predictive accuracy (score units)",
+    "loo": "Leave-one-out",
+    "calibration": "Calibration",
+    "ppc_pooled": "Posterior predictive p-values, pooled",
+    "ppc_per_benchmark": "Posterior predictive, per benchmark",
+}
+
+
+def _draw_metrics_page(fig, metrics: pd.DataFrame) -> None:
+    """Lay the metrics table out over two columns, split at a section break."""
+    blocks = []
+    for section, rows in metrics.groupby("section", sort=False):
+        lines = [("header", _SECTION_TITLES.get(section, section), "", "")]
+        lines += [("row", r.metric, _format_value(r.value), r.guide)
+                  for r in rows.itertuples()]
+        blocks.append(lines)
+
+    # Balance the columns by line count, breaking only between sections
+    total = sum(len(b) + 1 for b in blocks)
+    left, right, running = [], [], 0
+    for block in blocks:
+        (left if running < total / 2 else right).extend(block + [("gap", "", "", "")])
+        running += len(block) + 1
+
+    for column, x in ((left, 0.06), (right, 0.55)):
+        y = 0.90
+        for kind, label, value, guide in column:
+            if kind == "gap":
+                y -= 0.018
+                continue
+            if kind == "header":
+                fig.text(x, y, label, fontsize=9.5, weight="bold", color="#1A1D26")
+                y -= 0.026
+                continue
+            fig.text(x + 0.012, y, label, fontsize=8, family="monospace", color="#5A6078")
+            fig.text(x + 0.245, y, value, fontsize=8, family="monospace",
+                     color="#1A1D26", ha="right", weight="medium")
+            if guide:
+                fig.text(x + 0.262, y, guide, fontsize=6.8, color="#868DA3", style="italic")
+            y -= 0.0225
+
+
 def plot_evaluation(results: dict, path: "str | Path") -> Path:
-    """Write the diagnostic plots as a multi-page PDF (needs matplotlib)."""
+    """Write the evaluation as a two-page PDF (needs matplotlib).
+
+    Page 1 is the metrics table — every headline number, the same content as
+    ``metrics.csv``. Page 2 is the two QQ plots, which are here because they
+    show something a table cannot: *where* on the score scale the fit departs
+    from the data.
+    """
     import matplotlib
 
     matplotlib.use("Agg")
@@ -570,90 +796,42 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
     from matplotlib.backends.backend_pdf import PdfPages
 
     path = Path(path)
-    accuracy = results["accuracy"]
-    per_benchmark = accuracy[accuracy["benchmark"] != _OVERALL]
     qq = results["qq"]
 
     with PdfPages(path) as pdf:
-        # Page 1: did the sampler work?
-        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-        parameters = results["sampler_parameters"]
-        axes[0].hist(parameters["r_hat"], bins=40, color="#4477aa")
-        axes[0].axvline(1.01, color="#cc3311", ls="--", label="1.01")
-        axes[0].set(xlabel="r_hat", ylabel="parameters", title="Convergence")
-        axes[0].legend()
-        axes[1].hist(parameters["ess_bulk"], bins=40, color="#4477aa")
-        axes[1].set(xlabel="ESS (bulk)", ylabel="parameters", title="Effective sample size")
-        axes[2].scatter(parameters["ess_bulk"], parameters["r_hat"], s=6, alpha=0.5)
-        axes[2].axhline(1.01, color="#cc3311", ls="--")
-        axes[2].set(xlabel="ESS (bulk)", ylabel="r_hat", title="ESS vs r_hat")
-        fig.suptitle("Sampler diagnostics")
-        fig.tight_layout()
+        fig = plt.figure(figsize=(11, 8.5))
+        fig.suptitle("Evaluation metrics", fontsize=14, weight="bold", x=0.06, ha="left", y=0.96)
+        _draw_metrics_page(fig, results["metrics"])
         pdf.savefig(fig)
         plt.close(fig)
 
-        # Page 2: how well does it predict?
-        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-        axes[0].hist(per_benchmark["rmse"], bins=30, color="#4477aa")
-        axes[0].axvline(_overall(accuracy)["rmse"], color="#cc3311", ls="--", label="overall")
-        axes[0].set(xlabel="RMSE", ylabel="benchmarks", title="RMSE by benchmark")
-        axes[0].legend()
-        axes[1].scatter(per_benchmark["n_obs"], per_benchmark["rmse"], s=14, alpha=0.7)
-        axes[1].set(xlabel="observations", ylabel="RMSE", title="RMSE vs benchmark size")
-        axes[2].scatter(per_benchmark["observed_mean"], per_benchmark["predicted_mean"], s=14, alpha=0.7)
-        lims = [0, 1]
-        axes[2].plot(lims, lims, color="#cc3311", ls="--")
-        axes[2].set(xlabel="observed mean score", ylabel="predicted mean score",
-                    title="Benchmark means", xlim=lims, ylim=lims)
-        fig.suptitle("Predictive accuracy")
-        fig.tight_layout()
-        pdf.savefig(fig)
-        plt.close(fig)
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
 
-        # Page 3: calibration, as a QQ plot and as coverage
-        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-        axes[0].plot(qq["pit_uniform"], qq["pit_sorted"], lw=1.5)
-        axes[0].plot([0, 1], [0, 1], color="#cc3311", ls="--")
-        axes[0].set(xlabel="uniform quantile", ylabel="PIT quantile",
-                    title="PIT QQ plot (calibration)")
-        axes[1].hist(results["pit"]["pit"], bins=40, density=True, color="#4477aa")
-        axes[1].axhline(1.0, color="#cc3311", ls="--")
-        axes[1].set(xlabel="PIT", ylabel="density", title="PIT histogram")
-        coverage = _overall(results["calibration"])
-        levels = [c for c in coverage.index if c.startswith("coverage_")]
-        nominal = [float(c.split("_")[1]) for c in levels]
-        axes[2].plot(nominal, [coverage[c] for c in levels], "o-")
-        axes[2].plot([0, 1], [0, 1], color="#cc3311", ls="--")
-        axes[2].set(xlabel="nominal coverage", ylabel="observed coverage",
-                    title="Interval coverage", xlim=(0, 1), ylim=(0, 1))
-        fig.suptitle("Calibration")
-        fig.tight_layout()
-        pdf.savefig(fig)
-        plt.close(fig)
+        # Calibration: are the predictive distributions the right shape?
+        axes[0].plot(qq["pit_uniform"], qq["pit_sorted"], lw=1.6, color="#2563A8")
+        axes[0].plot([0, 1], [0, 1], color="#B45309", ls="--", lw=1)
+        axes[0].set(
+            xlabel="uniform quantile", ylabel="PIT quantile",
+            title="PIT QQ — calibration", xlim=(0, 1), ylim=(0, 1),
+        )
+        axes[0].text(
+            0.03, 0.95, "above the line = intervals too wide\nbelow = too narrow",
+            transform=axes[0].transAxes, fontsize=8, va="top", color="#5A6078",
+        )
 
-        # Page 4: posterior predictive and LOO
-        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-        axes[0].plot(qq["replicated_median"], qq["observed_quantiles"], lw=1.5)
-        axes[0].fill_betweenx(qq["observed_quantiles"], qq["replicated_ci_low"],
-                              qq["replicated_ci_high"], alpha=0.25, label="90% band")
-        axes[0].plot([0, 1], [0, 1], color="#cc3311", ls="--")
-        axes[0].set(xlabel="predicted quantile", ylabel="observed quantile",
-                    title="Score QQ plot")
-        axes[0].legend()
-        ppc = results["ppc"]
-        for statistic, colour in (("variance", "#4477aa"), ("iqr", "#ee7733")):
-            values = ppc[(ppc["statistic"] == statistic) & (ppc["benchmark"] != _OVERALL)]["ppp"]
-            axes[1].hist(values, bins=20, range=(0, 1), alpha=0.6, label=statistic, color=colour)
-        axes[1].set(xlabel="posterior predictive p-value", ylabel="benchmarks",
-                    title="Spread checks by benchmark")
-        axes[1].legend()
-        loo_observations = results["loo_observations"]
-        axes[2].scatter(range(len(loo_observations)), loo_observations["pareto_k"].to_numpy(),
-                        s=5, alpha=0.5)
-        for threshold, label in PARETO_K_BANDS:
-            axes[2].axhline(threshold, color="#cc3311", ls="--", lw=0.8)
-        axes[2].set(xlabel="observation (ranked)", ylabel="Pareto k", title="PSIS-LOO reliability")
-        fig.suptitle("Posterior predictive and leave-one-out")
+        # Fit: where on the score scale do observed and predicted diverge?
+        axes[1].fill_betweenx(
+            qq["observed_quantiles"], qq["replicated_ci_low"], qq["replicated_ci_high"],
+            alpha=0.22, color="#2563A8", label="90% band",
+        )
+        axes[1].plot(qq["replicated_median"], qq["observed_quantiles"], lw=1.6, color="#2563A8")
+        axes[1].plot([0, 1], [0, 1], color="#B45309", ls="--", lw=1)
+        axes[1].set(
+            xlabel="predicted quantile", ylabel="observed quantile",
+            title="Score QQ — where the fit departs", xlim=(0, 1), ylim=(0, 1),
+        )
+        axes[1].legend(loc="lower right", fontsize=9)
+
         fig.tight_layout()
         pdf.savefig(fig)
         plt.close(fig)
@@ -664,7 +842,10 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
 def save_evaluation(results: dict, output_dir: "str | Path", plots: bool = True) -> list[Path]:
     """
     Write every table as a CSV, the headline numbers as a text summary, and
-    (unless ``plots=False``) the plots as ``evaluation_report.pdf``.
+    (unless ``plots=False``) the metrics table and QQ plots as
+    ``evaluation_report.pdf``.
+
+    ``metrics.csv`` is the one to read first: every headline number, flat.
 
     Returns the paths written.
     """

@@ -37,7 +37,7 @@ class TestEvaluationWiring:
         results, _ = evaluated
         assert set(results) == {
             "sampler_summary", "sampler_parameters", "accuracy", "loo_summary",
-            "loo_observations", "ppc", "calibration", "pit", "qq",
+            "loo_observations", "ppc", "calibration", "pit", "qq", "metrics",
         }
 
     def test_fit_without_evaluate_has_no_evaluation(self, truth):
@@ -76,24 +76,61 @@ class TestSamplerDiagnostics:
 
 
 
-class TestAccuracy:
-    def test_one_row_per_benchmark_plus_overall(self, evaluated):
+class TestMetricsTable:
+    def test_every_section_is_present(self, evaluated):
         results, df = evaluated
-        accuracy = results["accuracy"]
-        assert len(accuracy) == N_BENCHMARKS + 1
-        assert accuracy["benchmark"].iloc[-1] == "OVERALL"
-        assert accuracy.loc[accuracy["benchmark"] == "OVERALL", "n_obs"].iloc[0] == len(df)
+        metrics = results["metrics"].set_index("metric")["value"]
+        assert set(results["metrics"]["section"]) == {
+            "data", "sampling", "accuracy", "loo", "calibration",
+            "ppc_pooled", "ppc_per_benchmark",
+        }
+        assert metrics["n_obs"] == len(df)
+        assert metrics["n_benchmarks"] == N_BENCHMARKS
 
-    def test_errors_are_plausible_and_ordered(self, evaluated):
-        """MAE cannot exceed RMSE, and the in-sample fit cannot be worse than
+    def test_metric_names_are_unique(self, evaluated):
+        """The name is the lookup key, so a collision silently turns a scalar
+        into a Series for every caller."""
+        results, _ = evaluated
+        metrics = results["metrics"]["metric"]
+        assert not metrics.duplicated().any(), list(metrics[metrics.duplicated()])
+
+    def test_headline_errors_are_plausible(self, evaluated):
+        """MAE cannot exceed RMSE, and the in-sample fit cannot beat
         leave-one-out."""
         results, _ = evaluated
+        metrics = results["metrics"].set_index("metric")["value"]
+        assert metrics["mae"] <= metrics["rmse"] + 1e-12
+        assert metrics["rmse"] <= metrics["rmse_loo"] + 1e-9
+        assert 0 < metrics["rmse"] < 0.5
+        assert abs(metrics["bias"]) < 0.05
+
+
+class TestAccuracy:
+    def test_one_row_per_benchmark_no_pooled_row(self, evaluated):
+        """The per-benchmark table carries no OVERALL row: the pooled numbers
+        live in the metrics table."""
+        results, _ = evaluated
         accuracy = results["accuracy"]
-        assert (accuracy["mae"] <= accuracy["rmse"] + 1e-12).all()
-        overall = accuracy[accuracy["benchmark"] == "OVERALL"].iloc[0]
-        assert overall["rmse"] <= overall["rmse_loo"] + 1e-9
-        assert 0 < overall["rmse"] < 0.5
-        assert abs(overall["bias"]) < 0.05
+        assert len(accuracy) == N_BENCHMARKS
+        assert "OVERALL" not in set(accuracy["benchmark"])
+
+    def test_reports_the_ratio_not_raw_rmse(self, evaluated):
+        """Raw per-benchmark RMSE is a restatement of kappa, so it is not
+        reported; the ratio against the model's own predicted SD is."""
+        results, _ = evaluated
+        accuracy = results["accuracy"]
+        assert "rmse" not in accuracy.columns
+        assert {"predicted_sd", "rmse_ratio", "bias"} <= set(accuracy.columns)
+        assert (accuracy["predicted_sd"] > 0).all()
+        assert (accuracy["rmse_ratio"] > 0).all()
+        assert accuracy["rmse_ratio"].is_monotonic_decreasing
+
+    def test_ratio_is_near_one_when_the_model_is_right(self, evaluated):
+        """The data are Beta draws with the model's own noise, so each
+        benchmark should scatter about as much as the model claims."""
+        results, _ = evaluated
+        ratio = results["accuracy"]["rmse_ratio"]
+        assert 0.5 < ratio.median() < 1.5
 
 
 class TestLoo:
@@ -179,11 +216,12 @@ class TestSaving:
         names = {path.name for path in written}
         assert "summary.txt" in names
         assert "evaluation_report.pdf" in names
+        assert "metrics.csv" in names
         assert "sampler_summary.csv" in names and "ppc.csv" in names
         assert all(path.exists() and path.stat().st_size > 0 for path in written)
         # the qq arrays are for plotting, not a table
         assert "qq.csv" not in names
-        assert pd.read_csv(tmp_path / "accuracy.csv").shape[0] == N_BENCHMARKS + 1
+        assert pd.read_csv(tmp_path / "accuracy.csv").shape[0] == N_BENCHMARKS
 
     def test_plots_can_be_skipped(self, evaluated, tmp_path):
         results, _ = evaluated
