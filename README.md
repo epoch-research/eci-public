@@ -11,6 +11,10 @@ to a table of benchmark scores, estimating:
 - **Discriminabilities**: one slope per benchmark, governing how sharply
   scores rise as capability increases
 
+Two fits of that curve are available: a least-squares one with bootstrap
+confidence intervals (the default), and a Bayesian one fitted by MCMC, whose
+intervals come straight from the posterior. See [Bayesian fit](#bayesian-fit).
+
 For details on the methodology, see:
 - **Paper**: [A Rosetta Stone for AI Benchmarks](https://arxiv.org/abs/2512.00193)
 - **Website**: [Epoch Capabilities Index](https://epoch.ai/benchmarks/eci#overview)
@@ -21,6 +25,9 @@ For details on the methodology, see:
 git clone https://github.com/epoch-research/eci-public.git
 cd eci-public
 pip install -e .
+
+# For the Bayesian fit (installs PyMC and ArviZ)
+pip install -e ".[bayesian]"
 ```
 
 ## Usage
@@ -44,6 +51,10 @@ python scripts/fit_eci.py --bootstrap-samples 100
 
 # Use numerical Jacobian (slower)
 python scripts/fit_eci.py --numeric-jacobian
+
+# Fit the Bayesian model instead (about a minute on the published data)
+python scripts/fit_eci.py --method bayesian
+python scripts/fit_eci.py --method bayesian --draws 8000 --chains 4
 ```
 
 ### Python API
@@ -68,9 +79,70 @@ Everything is returned on the ECI scale, defined by two anchor models
 - `draws`: the scaled bootstrap draws (model ECIs, benchmark difficulties
   and slopes) plus the per-draw scale transforms.
 
-CIs are quantiles of the bootstrap draws, each draw re-anchored with its
+CIs are quantiles of the draws (bootstrap or posterior, depending on the
+fit), each draw re-anchored with its
 own scale transform so the anchor models sit at exactly 130/150 in every
 draw; the anchors themselves get NaN CIs, being pinned by definition.
+
+### Bayesian fit
+
+`fit_bayesian_eci` fits the same curve with MCMC, returning the same three
+objects on the same ECI scale:
+
+```python
+from eci import prepare_benchmark_data, fit_bayesian_eci
+
+df = prepare_benchmark_data()
+eci_df, edi_df, draws = fit_bayesian_eci(df)
+
+print(eci_df[["Model", "eci", "eci_ci_low", "eci_ci_high"]].head(10))
+print(draws["trace"])  # the full arviz.InferenceData
+```
+
+Scores live in [0, 1], so the likelihood is a Beta with a per-benchmark
+concentration `kappa_b`:
+
+    mu[m, b]  = sigmoid(slope[b] * (capability[m] - difficulty[b]))
+    y[m, b]  ~ Beta(mu * kappa[b], (1 - mu) * kappa[b])
+
+whose variance is `mu * (1 - mu) / (kappa_b + 1)`. A low `kappa_b` means the
+benchmark's scores scatter widely around the curve — something other than
+capability and difficulty is driving them; a high `kappa_b` means the curve
+explains them tightly. One `kappa` per benchmark lets the fit lean on the
+benchmarks that are actually informative about capability, and `edi_df`
+reports it alongside difficulty and slope.
+
+The priors are weakly informative:
+
+| Parameter | Prior | Notes |
+| --- | --- | --- |
+| `C_m` (capability) | `Normal(0, tau_cd)` | |
+| `D_b` (difficulty) | `ZeroSumNormal(tau_cd)` | `sum_b D_b = 0` fixes the location |
+| `alpha_b` (slope) | `exp(ZeroSumNormal(tau_alpha))` | `prod_b alpha_b = 1` fixes the scale |
+| `tau_cd` | `LogNormal(ln 3, 0.5)` | shared scale of capability and difficulty |
+| `tau_alpha` | `LogNormal(ln 0.5, 0.5)` | |
+| `kappa_b` | `LogNormal(ln 20, 1)` | per-benchmark Beta concentration |
+
+Those two sum-to-zero constraints are what identify the fit, so it uses no
+anchor benchmark and no L2 penalty. The three hyperpriors are customisable,
+each given as the `(mu, sigma)` of the underlying normal:
+
+```python
+from eci import BayesianPriors, fit_bayesian_eci
+
+priors = BayesianPriors(kappa=(np.log(50.0), 1.0))
+eci_df, edi_df, draws = fit_bayesian_eci(df, priors=priors, target_accept=0.95)
+```
+
+`build_bayesian_model(df)` returns the `pm.Model` itself if you want to sample
+it differently or inspect it. Divergences and poor mixing are reported as
+warnings, not errors, so the draws are still returned for inspection. On the
+published data the default 4 chains x (2000 tune + 4000 draws) take about 90
+seconds and mix cleanly, except for the global scale `tau_cd`, which lands at
+r-hat 1.01-1.02 however long it tunes and so trips that warning now and then;
+it is a nuisance parameter, and every reported quantity sits at or below 1.01.
+
+### Bootstrap
 
 Bootstrap resampling holds the set of models fixed and resamples each
 model's benchmark results with replacement. Any fit — central or bootstrap —
