@@ -86,12 +86,19 @@ def main():
         "--chains", type=int, default=4, help="Number of chains (default: 4)",
     )
     bayesian.add_argument(
-        "--target-accept", type=float, default=0.9,
+        "--target-accept", type=float, default=0.95,
         help="NUTS target acceptance rate; raise towards 0.99 if the fit "
-             "reports divergences (default: 0.9)",
+             "reports divergences (default: 0.95)",
     )
     bayesian.add_argument(
         "--seed", type=int, default=12345, help="Sampler seed (default: 12345)",
+    )
+    bayesian.add_argument(
+        "--non-centred",
+        action="store_true",
+        help="Sample the item parameters as unit-scale offsets rescaled by "
+             "their hyperparameter, instead of directly. Same posterior, "
+             "different geometry for the sampler",
     )
     bayesian.add_argument(
         "--evaluate",
@@ -119,6 +126,7 @@ def main():
             chains=args.chains,
             target_accept=args.target_accept,
             random_seed=args.seed,
+            centred=not args.non_centred,
             evaluate=args.evaluate,
         )
     else:

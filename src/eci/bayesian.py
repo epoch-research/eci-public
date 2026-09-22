@@ -172,7 +172,8 @@ def _prepare_performance(df: pd.DataFrame, performance_clip_eps: float) -> np.nd
 def build_bayesian_model(
     df: pd.DataFrame,
     priors: BayesianPriors = BayesianPriors(),
-    performance_clip_eps: float = 1e-3,
+    performance_clip_eps: float = 1e-4,
+    centred: bool = True,
 ) -> pm.Model:
     """
     Build the PyMC model, ready to sample from or inspect.
@@ -184,6 +185,23 @@ def build_bayesian_model(
         performance_clip_eps: clip performance into [eps, 1 - eps]. The Beta
             likelihood has no density at exactly 0 or 1, so this must be
             positive whenever the data touch either bound.
+
+            It is not a free numerical tolerance. Most boundary rows fit a
+            shape parameter mu*kappa < 1, where the Beta density *diverges*
+            as the value goes to 0 - so shrinking eps hands the likelihood an
+            unbounded reward for pushing those rows' mu down, and the model
+            pays for it by lowering the capability of the models involved and
+            the kappa of the benchmarks carrying the zeros. Going from 1e-4 to
+            1e-6 on the published data buys 0.03 of squared error at the 82
+            exact zeros and adds 0.24 across the 2457-row bulk.
+
+            The default is one item's worth of resolution for a benchmark of a
+            few thousand items: an observed 0 says the true rate is below
+            about 1/N, not that it equals eps.
+        centred: sample the item parameters directly (the default), or, when
+            False, as unit-scale offsets rescaled by their hyperparameter.
+            The two define the *same* posterior and differ only in the
+            coordinates NUTS explores - see the note below.
 
     Returns:
         A ``pm.Model`` whose coordinates are the model and benchmark *names*
@@ -198,22 +216,27 @@ def build_bayesian_model(
         tau_alpha = _lognormal("tau_alpha", priors.tau_alpha)
         kappa = _lognormal("kappa", priors.kappa, dims="benchmark")
 
-        # Non-centred: each item parameter is a unit-scale offset times its
-        # hyperscale. Same posterior as writing the scales in directly, but it
-        # decouples the offsets from tau_cd / tau_alpha, which is what keeps
-        # NUTS out of Neal's funnel on the sparsely measured models.
-        capability_z = pm.Normal("capability_z", 0.0, 1.0, dims="model")
-        capability = pm.Deterministic("capability", capability_z * tau_cd, dims="model")
-
-        # sum_b D_b = 0 fixes the location of the capability scale.
-        difficulty_z = pm.ZeroSumNormal("difficulty_z", sigma=1.0, dims="benchmark")
-        difficulty = pm.Deterministic("difficulty", difficulty_z * tau_cd, dims="benchmark")
-
+        # Centred draws each item parameter straight from its prior; non-centred
+        # writes it as a unit-scale offset times the hyperscale. Identical
+        # posteriors, different geometry for the sampler. Centred suits data that
+        # pin each parameter tightly; non-centred decouples the offsets from
+        # tau_cd / tau_alpha and so avoids Neal's funnel where they do not.
+        #
+        # The zero-sum constraints are what identify the fit either way:
+        # sum_b D_b = 0 fixes the location of the capability scale, and
         # prod_b alpha_b = 1 (geometric mean 1) fixes its scale.
-        log_slope_z = pm.ZeroSumNormal("log_slope_z", sigma=1.0, dims="benchmark")
-        slope = pm.Deterministic(
-            "slope", pm.math.exp(log_slope_z * tau_alpha), dims="benchmark"
-        )
+        if centred:
+            capability = pm.Normal("capability", 0.0, tau_cd, dims="model")
+            difficulty = pm.ZeroSumNormal("difficulty", sigma=tau_cd, dims="benchmark")
+            log_slope = pm.ZeroSumNormal("log_slope", sigma=tau_alpha, dims="benchmark")
+        else:
+            capability_z = pm.Normal("capability_z", 0.0, 1.0, dims="model")
+            capability = pm.Deterministic("capability", capability_z * tau_cd, dims="model")
+            difficulty_z = pm.ZeroSumNormal("difficulty_z", sigma=1.0, dims="benchmark")
+            difficulty = pm.Deterministic("difficulty", difficulty_z * tau_cd, dims="benchmark")
+            log_slope_z = pm.ZeroSumNormal("log_slope_z", sigma=1.0, dims="benchmark")
+            log_slope = log_slope_z * tau_alpha
+        slope = pm.Deterministic("slope", pm.math.exp(log_slope), dims="benchmark")
 
         eta = slope[bench_idx] * (capability[model_idx] - difficulty[bench_idx])
         mu = pm.math.clip(pm.math.sigmoid(eta), _MU_EPS, 1.0 - _MU_EPS)
@@ -285,11 +308,12 @@ def _anchor_transform(
 def fit_bayesian_eci(
     df: pd.DataFrame,
     priors: BayesianPriors = BayesianPriors(),
-    performance_clip_eps: float = 1e-3,
+    performance_clip_eps: float = 1e-4,
+    centred: bool = True,
     draws: int = 4000,
     tune: int = 2000,
     chains: int = 4,
-    target_accept: float = 0.9,
+    target_accept: float = 0.95,
     random_seed: int = 12345,
     *,
     anchor_model_low: str = DEFAULT_ANCHOR_MODEL_LOW,
@@ -312,11 +336,14 @@ def fit_bayesian_eci(
             benchmark, Model.
         priors: hyperpriors; see :class:`BayesianPriors`.
         performance_clip_eps: clip performance into [eps, 1 - eps].
+        centred: parameterisation; see :func:`build_bayesian_model`.
         draws: posterior draws kept per chain.
         tune: tuning (warm-up) steps per chain, discarded.
         chains: number of chains, run in parallel where cores allow.
         target_accept: NUTS target acceptance rate; raise it towards 0.99 if
-            the fit reports divergences.
+            the fit reports divergences. The centred parameterisation needs a
+            higher value than the non-centred one to keep its step size small
+            enough for the narrow part of the funnel.
         random_seed: seed for the sampler.
         anchor_model_low / anchor_eci_low / anchor_model_high /
             anchor_eci_high: the models that define the ECI scale and their
@@ -360,11 +387,9 @@ def fit_bayesian_eci(
     anchor capabilities coincide or invert in any draw raises, since no scale
     is then defined.
 
-    On the published data the defaults give a clean fit apart from the global
-    scale ``tau_cd``, which mixes slowly and lands at r_hat 1.01-1.02 whatever
-    the tuning length, so the convergence warning fires intermittently. It is
-    a nuisance parameter: everything the fit reports - capability, difficulty,
-    slope and kappa - sits at or below 1.01.
+    The global scale ``tau_cd`` is the slowest-mixing parameter and the one
+    that trips the convergence warning first; it is a nuisance parameter, and
+    the quantities the fit reports converge well before it does.
     """
     model_ids, model_names, bench_ids, bench_names, _, _ = _index_data(df)
     try:
@@ -381,7 +406,7 @@ def fit_bayesian_eci(
             **sample_kwargs.get("idata_kwargs", {}), "log_likelihood": True
         }
 
-    pymc_model = build_bayesian_model(df, priors, performance_clip_eps)
+    pymc_model = build_bayesian_model(df, priors, performance_clip_eps, centred)
     with pymc_model:
         trace = pm.sample(
             draws=draws,
