@@ -8,7 +8,7 @@ Usage:
     python scripts/fit_eci.py --bootstrap-samples 200
     python scripts/fit_eci.py --numeric-jacobian
     python scripts/fit_eci.py --method bayesian
-    python scripts/fit_eci.py --method bayesian --draws 8000 --chains 4
+    python scripts/fit_eci.py --method bayesian --evaluate
 """
 
 import argparse
@@ -93,6 +93,13 @@ def main():
     bayesian.add_argument(
         "--seed", type=int, default=12345, help="Sampler seed (default: 12345)",
     )
+    bayesian.add_argument(
+        "--evaluate",
+        action="store_true",
+        help="Also run the diagnostic suite (convergence, accuracy, LOO, "
+             "calibration, posterior predictive checks) and write it, with a "
+             "PDF of plots, to <output-dir>/evaluation/",
+    )
     args = parser.parse_args()
 
     print(f"Preparing benchmark data from {args.input}...")
@@ -105,13 +112,14 @@ def main():
 
         print(f"\nFitting Bayesian IRT model ({args.chains} chains, "
               f"{args.draws} draws, {args.tune} tuning steps)...")
-        eci_df, edi_df, _ = fit_bayesian_eci(
+        eci_df, edi_df, draws = fit_bayesian_eci(
             df,
             draws=args.draws,
             tune=args.tune,
             chains=args.chains,
             target_accept=args.target_accept,
             random_seed=args.seed,
+            evaluate=args.evaluate,
         )
     else:
         jacobian_type = "numerical" if args.numeric_jacobian else "analytical"
@@ -156,6 +164,16 @@ def main():
     ]
     edi_df[edi_cols].to_csv(edi_output, index=False)
     print(f"Saved EDI scores to {edi_output}")
+
+    if args.method == "bayesian" and args.evaluate:
+        from eci import save_evaluation, summarise_evaluation
+
+        evaluation = draws["evaluation"]
+        written = save_evaluation(evaluation, args.output_dir / "evaluation")
+        print(f"\nSaved {len(written)} evaluation files to "
+              f"{args.output_dir / 'evaluation'}")
+        print("\n=== Evaluation ===")
+        print(summarise_evaluation(evaluation))
 
     # Print summary
     print("\n=== Top 10 Models by ECI ===")

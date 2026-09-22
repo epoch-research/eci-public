@@ -79,10 +79,12 @@ Everything is returned on the ECI scale, defined by two anchor models
 - `draws`: the scaled bootstrap draws (model ECIs, benchmark difficulties
   and slopes) plus the per-draw scale transforms.
 
-CIs are quantiles of the draws (bootstrap or posterior, depending on the
-fit), each draw re-anchored with its
-own scale transform so the anchor models sit at exactly 130/150 in every
-draw; the anchors themselves get NaN CIs, being pinned by definition.
+Both fits carry the same interval columns, cut from their own draws: the
+least-squares fit takes quantiles of the bootstrap draws, the Bayesian fit
+takes the 90% highest-density interval of the posterior. Either way each draw
+is re-anchored with its own scale transform, so the anchor models sit at
+exactly 130/150 in every draw; the anchors themselves get NaN intervals, being
+pinned by definition.
 
 ### Bayesian fit
 
@@ -96,8 +98,16 @@ df = prepare_benchmark_data()
 eci_df, edi_df, draws = fit_bayesian_eci(df)
 
 print(eci_df[["Model", "eci", "eci_ci_low", "eci_ci_high"]].head(10))
+print(edi_df[["benchmark", "edi", "edi_ci_low", "edi_ci_high"]].head(10))
 print(draws["trace"])  # the full arviz.InferenceData
 ```
+
+`eci` and `edi` are posterior means; the `_ci_low` / `_ci_high` columns are
+90% **highest-density intervals** — the narrowest window holding 90% of the
+posterior. The same applies to `discriminability_scaled` and `kappa`, whose
+posteriors are skewed and where an HDI is meaningfully tighter than equal
+tails. Pass `interval="eti"` for equal-tailed intervals (5th/95th percentiles)
+instead, or `ci_level=` for a different mass.
 
 Scores live in [0, 1], so the likelihood is a Beta with a per-benchmark
 concentration `kappa_b`:
@@ -133,6 +143,58 @@ from eci import BayesianPriors, fit_bayesian_eci
 priors = BayesianPriors(kappa=(np.log(50.0), 1.0))
 eci_df, edi_df, draws = fit_bayesian_eci(df, priors=priors, target_accept=0.95)
 ```
+
+### Evaluating a fit
+
+`evaluate=True` runs a diagnostic suite alongside the fit and returns it under
+`draws["evaluation"]`:
+
+```python
+from eci import fit_bayesian_eci, save_evaluation, summarise_evaluation
+
+eci_df, edi_df, draws = fit_bayesian_eci(df, evaluate=True)
+print(summarise_evaluation(draws["evaluation"]))
+save_evaluation(draws["evaluation"], "outputs/evaluation")
+```
+
+or from the command line, which writes the same thing to
+`<output-dir>/evaluation/`:
+
+```bash
+python scripts/fit_eci.py --method bayesian --evaluate
+```
+
+It answers three separate questions, and the tables are written one CSV each
+alongside a `summary.txt` and a four-page `evaluation_report.pdf`:
+
+| Table | What it tells you |
+| --- | --- |
+| `sampler_summary`, `sampler_parameters` | Did NUTS work? Divergences, r-hat, ESS (bulk and tail), MCSE, BFMI |
+| `accuracy` | RMSE, MAE and bias per benchmark, in-sample and leave-one-out weighted |
+| `loo_summary`, `loo_observations` | `elpd_loo`, `p_loo`, and the Pareto k of every observation |
+| `ppc` | Posterior predictive p-values for mean, sd, variance, IQR, min, max, skew and tail shares |
+| `calibration`, `pit` | PIT per observation, coverage against nominal, KS test of uniformity |
+| `qq` | Arrays for the PIT-uniform and score QQ plots |
+
+Two things to know before reading the numbers:
+
+- **Accuracy is scored against the raw scores, the distributional checks
+  against the clipped ones.** The Beta likelihood is never shown a score of
+  exactly 0 or 1, so it cannot be asked to have predicted one; scoring the PIT
+  against raw scores makes clipping look like miscalibration. On a correctly
+  specified synthetic fit, 90% coverage reads 0.78 against raw scores and 0.96
+  against clipped ones.
+- **Read the spread checks (sd, variance, IQR) per benchmark, not pooled.**
+  Pooled across benchmarks they measure the spread of the fitted curve, which
+  partial pooling deliberately shrinks, so the pooled p-value runs low even
+  for a model that is right. On that same synthetic fit the ten per-benchmark
+  variance p-values ranged 0.11–0.65 while the pooled one was 0.0005.
+
+`evaluate=True` keeps the pointwise log likelihood and draws a replicated
+dataset per posterior draw, both of which are (draws × observations) arrays,
+so the fit uses more memory and time. The per-observation metrics thin to
+`evaluation_max_draws` (2000 by default); the sampler diagnostics always use
+every draw.
 
 `build_bayesian_model(df)` returns the `pm.Model` itself if you want to sample
 it differently or inspect it. Divergences and poor mixing are reported as

@@ -49,6 +49,7 @@ import numpy as np
 import pandas as pd
 import pymc as pm
 
+from .evaluation import evaluate_fit
 from .fitting import (
     DEFAULT_ANCHOR_ECI_HIGH,
     DEFAULT_ANCHOR_ECI_LOW,
@@ -63,6 +64,9 @@ _MU_EPS = 1e-6
 
 # Variables checked for convergence after sampling.
 _DIAGNOSTIC_VARS = ["capability", "difficulty", "slope", "kappa", "tau_cd", "tau_alpha"]
+
+# How the reported intervals are cut out of the posterior.
+INTERVAL_KINDS = ("hdi", "eti")
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,34 @@ class BayesianPriors:
     tau_cd: tuple[float, float] = field(default=(float(np.log(3.0)), 0.5))
     tau_alpha: tuple[float, float] = field(default=(float(np.log(0.5)), 0.5))
     kappa: tuple[float, float] = field(default=(float(np.log(20.0)), 1.0))
+
+
+def _hdi(values: np.ndarray, prob: float) -> tuple[np.ndarray, np.ndarray]:
+    """Highest-density interval of each column of ``values`` (draws x items).
+
+    The narrowest window containing ``prob`` of the draws, found by sliding it
+    over the sorted draws. For a skewed posterior - a slope or a kappa - this
+    is a tighter and more honest interval than cutting equal tails, and it
+    never places the point estimate outside its own interval.
+    """
+    n_draws = values.shape[0]
+    n_inside = max(1, min(n_draws, int(np.floor(prob * n_draws))))
+    ordered = np.sort(values, axis=0)
+    # widths[i] is the span of the window starting at draw i
+    widths = ordered[n_inside - 1:] - ordered[: n_draws - n_inside + 1]
+    start = np.argmin(widths, axis=0)
+    columns = np.arange(values.shape[1])
+    return ordered[start, columns], ordered[start + n_inside - 1, columns]
+
+
+def _interval(values: np.ndarray, prob: float, kind: str) -> tuple[np.ndarray, np.ndarray]:
+    """Lower and upper bounds of each column's posterior interval."""
+    if kind == "hdi":
+        return _hdi(values, prob)
+    if kind == "eti":
+        tail = (1.0 - prob) / 2.0
+        return tuple(np.quantile(values, [tail, 1.0 - tail], axis=0))
+    raise ValueError(f"Unknown interval={kind!r}. Choose one of {INTERVAL_KINDS}.")
 
 
 def _lognormal(name: str, prior: tuple[float, float], dims: str | None = None):
@@ -265,6 +297,9 @@ def fit_bayesian_eci(
     anchor_model_high: str = DEFAULT_ANCHOR_MODEL_HIGH,
     anchor_eci_high: float = DEFAULT_ANCHOR_ECI_HIGH,
     ci_level: float = 0.90,
+    interval: str = "hdi",
+    evaluate: bool = False,
+    evaluation_max_draws: int = 2000,
     progressbar: bool = True,
     sampler_kwargs: "dict | None" = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
@@ -286,8 +321,19 @@ def fit_bayesian_eci(
         anchor_model_low / anchor_eci_low / anchor_model_high /
             anchor_eci_high: the models that define the ECI scale and their
             fixed values.
-        ci_level: central posterior mass for the intervals (0.90 -> 5th/95th
-            percentiles), matching the least-squares fit's convention.
+        ci_level: posterior mass the reported intervals carry (0.90 by
+            default, matching the least-squares fit's convention).
+        interval: how to cut that mass out of the posterior - "hdi" for the
+            highest-density interval (the default: the narrowest window
+            holding ci_level of the draws), or "eti" for equal tails, i.e.
+            the 5th and 95th percentiles at ci_level=0.90.
+        evaluate: also run the diagnostic suite in :mod:`eci.evaluation` and
+            return it under draws["evaluation"]. This keeps the pointwise log
+            likelihood and draws a replicated dataset per posterior draw,
+            which the fit otherwise skips: both are (draws x observations)
+            arrays, so the fit uses noticeably more memory and time.
+        evaluation_max_draws: draws the evaluation thins down to for its
+            per-observation metrics.
         progressbar: show the sampling progress bar.
         sampler_kwargs: extra keyword arguments forwarded to ``pm.sample``,
             e.g. ``{"idata_kwargs": {"log_likelihood": True}}`` to keep the
@@ -295,7 +341,7 @@ def fit_bayesian_eci(
 
     Returns:
         (eci_df, edi_df, draws), everything on the ECI scale:
-        - eci_df: model_id, Model, eci (posterior mean), and
+        - eci_df: model_id, Model, eci (posterior mean), and the interval
           eci_ci_low / eci_ci_high (NaN for the anchor models, whose values
           are fixed by definition rather than estimated). Sorted by eci
           descending.
@@ -306,8 +352,9 @@ def fit_bayesian_eci(
           Sorted by edi.
         - draws: dict with model_ids, model_names, benchmark_ids,
           benchmark_names, the (n_draws, n) arrays eci, edi, slope and kappa,
-          the per-draw map coefficients a and b, and trace, the full
-          ``arviz.InferenceData``.
+          the per-draw map coefficients a and b, trace, the full
+          ``arviz.InferenceData``, and - with evaluate=True - evaluation,
+          the dict of diagnostic tables.
 
     Divergences and poor mixing are warned about, not raised; a fit whose
     anchor capabilities coincide or invert in any draw raises, since no scale
@@ -326,6 +373,14 @@ def fit_bayesian_eci(
     except ValueError as e:
         raise ValueError(f"Anchor model not found in data: {e}") from None
 
+    sample_kwargs = dict(sampler_kwargs or {})
+    if evaluate:
+        # LOO needs the pointwise log likelihood, which PyMC does not keep by
+        # default because it is one number per draw per observation.
+        sample_kwargs["idata_kwargs"] = {
+            **sample_kwargs.get("idata_kwargs", {}), "log_likelihood": True
+        }
+
     pymc_model = build_bayesian_model(df, priors, performance_clip_eps)
     with pymc_model:
         trace = pm.sample(
@@ -335,8 +390,15 @@ def fit_bayesian_eci(
             target_accept=target_accept,
             random_seed=random_seed,
             progressbar=progressbar,
-            **(sampler_kwargs or {}),
+            **sample_kwargs,
         )
+        if evaluate:
+            pm.sample_posterior_predictive(
+                trace,
+                extend_inferencedata=True,
+                random_seed=random_seed,
+                progressbar=progressbar,
+            )
     _check_convergence(trace)
 
     capability = _stack_draws(trace, "capability", "model")
@@ -367,11 +429,15 @@ def fit_bayesian_eci(
         "b": b,
         "trace": trace,
     }
-
-    tail = (1.0 - ci_level) / 2.0
+    if evaluate:
+        draws_out["evaluation"] = evaluate_fit(
+            trace, df,
+            max_draws=evaluation_max_draws,
+            performance_clip_eps=performance_clip_eps,
+        )
 
     def summarise(values: np.ndarray, name: str) -> dict[str, np.ndarray]:
-        low, high = np.quantile(values, [tail, 1.0 - tail], axis=0)
+        low, high = _interval(values, ci_level, interval)
         return {name: values.mean(axis=0), f"{name}_ci_low": low, f"{name}_ci_high": high}
 
     eci_df = pd.DataFrame(
