@@ -5,11 +5,10 @@ A package for fitting the Item Response Theory model used to compute
 ECI scores (model capabilities), EDI scores (benchmark difficulties),
 and benchmark discriminabilities (how sharply scores rise with capability).
 
-Two fits of the same curve are available: the least-squares one in
-``eci.fitting`` (bootstrap confidence intervals) and the Bayesian one in
-``eci.bayesian`` (posterior credible intervals). The Bayesian fit needs the
-extra dependencies installed with ``pip install -e ".[bayesian]"``, and is
-imported lazily so the least-squares fit does not require them.
+Two fits of the same curve are available: the Bayesian one in
+``eci.bayesian`` (``fit_bayesian_eci``, posterior credible intervals), which
+is the default, and the least-squares one in ``eci.fitting``
+(``fit_eci_model``, bootstrap confidence intervals).
 """
 
 from .fitting import fit_eci_model
@@ -20,7 +19,8 @@ from .dataloader import (
     load_model_metadata,
 )
 
-# Names served from the modules that need the [bayesian] extra
+# Served lazily: importing PyMC costs seconds, and callers that only load data
+# or run the least-squares fit should not pay it
 _LAZY_EXPORTS = {
     "fit_bayesian_eci": "bayesian",
     "build_bayesian_model": "bayesian",
@@ -43,7 +43,7 @@ __version__ = "0.2.0"
 
 def __getattr__(name: str):
     """Import the Bayesian fit and its evaluation suite on first use, so
-    ``import eci`` stays cheap and works without PyMC installed."""
+    ``import eci`` stays cheap for callers that never touch them."""
     if name in _LAZY_EXPORTS:
         from importlib import import_module
 

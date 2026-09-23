@@ -5,10 +5,10 @@ Fit ECI model and save scores to outputs directory.
 Usage:
     python scripts/fit_eci.py
     python scripts/fit_eci.py --input path/to/benchmark_data.zip
-    python scripts/fit_eci.py --bootstrap-samples 200
-    python scripts/fit_eci.py --numeric-jacobian
-    python scripts/fit_eci.py --method bayesian
-    python scripts/fit_eci.py --method bayesian --evaluate
+    python scripts/fit_eci.py --evaluate
+    python scripts/fit_eci.py --draws 8000 --chains 4
+    python scripts/fit_eci.py --method least-squares
+    python scripts/fit_eci.py --method least-squares --bootstrap-samples 200
 """
 
 import argparse
@@ -48,29 +48,16 @@ def main():
     )
     parser.add_argument(
         "--method",
-        choices=["least-squares", "bayesian"],
-        default="least-squares",
-        help="Fitting method: least squares with bootstrap CIs (default), or "
-             "Bayesian MCMC with posterior credible intervals",
+        choices=["bayesian", "least-squares"],
+        default="bayesian",
+        help="Fitting method: Bayesian MCMC with posterior credible intervals "
+             "(default), or least squares with bootstrap CIs",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=OUTPUT_DIR,
         help=f"Output directory for scores (default: {OUTPUT_DIR})",
-    )
-
-    least_squares = parser.add_argument_group("least-squares options")
-    least_squares.add_argument(
-        "--bootstrap-samples",
-        type=int,
-        default=500,
-        help="Number of bootstrap samples for confidence intervals (default: 500)",
-    )
-    least_squares.add_argument(
-        "--numeric-jacobian",
-        action="store_true",
-        help="Use numerical Jacobian instead of analytical (slower)",
     )
 
     bayesian = parser.add_argument_group("bayesian options")
@@ -107,7 +94,27 @@ def main():
              "calibration, posterior predictive checks) and write it, with a "
              "PDF of plots, to <output-dir>/evaluation/",
     )
+
+    least_squares = parser.add_argument_group("least-squares options")
+    least_squares.add_argument(
+        "--bootstrap-samples",
+        type=int,
+        default=500,
+        help="Number of bootstrap samples for confidence intervals (default: 500)",
+    )
+    least_squares.add_argument(
+        "--numeric-jacobian",
+        action="store_true",
+        help="Use numerical Jacobian instead of analytical (slower)",
+    )
+
     args = parser.parse_args()
+
+    if args.evaluate and args.method != "bayesian":
+        parser.error(
+            "--evaluate scores a posterior, so it needs --method bayesian; "
+            "the least-squares fit has no diagnostic suite"
+        )
 
     print(f"Preparing benchmark data from {args.input}...")
     df = prepare_benchmark_data(args.input)

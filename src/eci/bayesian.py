@@ -29,10 +29,35 @@ Priors (all customisable through :class:`BayesianPriors`):
     tau_alpha       ~ LogNormal(ln 0.5, 0.5)
     kappa_b         ~ LogNormal(ln 20, 1)
 
-The two sum-to-zero constraints are what identify the fit: pinning the
-difficulties' mean fixes the location, and pinning the slopes' geometric mean
-fixes the scale. That replaces the anchor benchmark and L2 penalty used by the
-least-squares fit; there is no anchor benchmark here.
+The two sum-to-zero constraints are what identify the fit: sum_b D_b = 0
+fixes the location of the capability scale, and prod_b a_b = 1 (a geometric
+mean of 1) fixes its multiplicative scale. That replaces the anchor benchmark
+and L2 penalty used by the least-squares fit; there is no anchor benchmark
+here.
+
+The item parameters are drawn either **centred** (straight from their priors,
+the default) or **non-centred** (as unit-scale offsets rescaled by their
+hyperparameter), switched by ``centred=``:
+
+    centred      C_m ~ Normal(0, tau_cd)
+    non-centred  z_m ~ Normal(0, 1),  C_m = z_m * tau_cd
+
+The two define the *same* posterior and differ only in the coordinates NUTS
+explores, so this is a sampling choice, not a modelling one. Both carry the
+same zero-sum constraints - the difficulties and log slopes are ZeroSumNormal
+either way - so the identification above does not depend on the choice.
+Centred suits data that pin each item parameter tightly; non-centred decouples
+the offsets from tau_cd / tau_alpha and so avoids Neal's funnel where the data
+do not.
+
+Which one wins depends on the data, and it interacts with ``target_accept``:
+the centred geometry needs a smaller step size to get through the narrow part
+of the funnel, so it needs a higher ``target_accept`` to work at all. Measured
+on the published data, centred at 0.95 beats non-centred at 0.9 on every
+diagnostic - including tau_cd, the global scale, which is the slowest mixer
+and the first parameter to trip the convergence warning. Retune
+``target_accept`` within a parameterisation before comparing the two; holding
+it fixed makes centred look far worse than it is.
 
 Results are reported on the ECI scale, defined by two anchor models
 (Claude 3.5 Sonnet -> 130, GPT-5 -> 150) via the affine map
@@ -201,7 +226,7 @@ def build_bayesian_model(
         centred: sample the item parameters directly (the default), or, when
             False, as unit-scale offsets rescaled by their hyperparameter.
             The two define the *same* posterior and differ only in the
-            coordinates NUTS explores - see the note below.
+            coordinates NUTS explores; see the module docstring.
 
     Returns:
         A ``pm.Model`` whose coordinates are the model and benchmark *names*
@@ -216,15 +241,6 @@ def build_bayesian_model(
         tau_alpha = _lognormal("tau_alpha", priors.tau_alpha)
         kappa = _lognormal("kappa", priors.kappa, dims="benchmark")
 
-        # Centred draws each item parameter straight from its prior; non-centred
-        # writes it as a unit-scale offset times the hyperscale. Identical
-        # posteriors, different geometry for the sampler. Centred suits data that
-        # pin each parameter tightly; non-centred decouples the offsets from
-        # tau_cd / tau_alpha and so avoids Neal's funnel where they do not.
-        #
-        # The zero-sum constraints are what identify the fit either way:
-        # sum_b D_b = 0 fixes the location of the capability scale, and
-        # prod_b alpha_b = 1 (geometric mean 1) fixes its scale.
         if centred:
             capability = pm.Normal("capability", 0.0, tau_cd, dims="model")
             difficulty = pm.ZeroSumNormal("difficulty", sigma=tau_cd, dims="benchmark")

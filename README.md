@@ -11,9 +11,11 @@ to a table of benchmark scores, estimating:
 - **Discriminabilities**: one slope per benchmark, governing how sharply
   scores rise as capability increases
 
-Two fits of that curve are available: a least-squares one with bootstrap
-confidence intervals (the default), and a Bayesian one fitted by MCMC, whose
-intervals come straight from the posterior. See [Bayesian fit](#bayesian-fit).
+Two fits of that curve are available: a Bayesian one fitted by MCMC (the
+default), whose intervals come straight from the posterior, and a
+least-squares one with bootstrap confidence intervals. See
+[Bayesian fit](#bayesian-fit-the-default) and
+[Least-squares fit](#least-squares-fit).
 
 For details on the methodology, see:
 - **Paper**: [A Rosetta Stone for AI Benchmarks](https://arxiv.org/abs/2512.00193)
@@ -25,10 +27,12 @@ For details on the methodology, see:
 git clone https://github.com/epoch-research/eci-public.git
 cd eci-public
 pip install -e .
-
-# For the Bayesian fit (installs PyMC and ArviZ)
-pip install -e ".[bayesian]"
 ```
+
+The Bayesian fit is the default, so PyMC and ArviZ are ordinary dependencies
+and install with the package. Importing them costs a few seconds, so `eci`
+defers that until you call the Bayesian fit: `import eci` and the least-squares
+fit stay fast.
 
 ## Usage
 
@@ -40,32 +44,51 @@ loader downloads and processes into one row per model x benchmark (see
 ### Command Line
 
 ```bash
-# Download benchmark_data.zip, fit model and save results to outputs/
+# Download benchmark_data.zip, fit the Bayesian model and save results to
+# outputs/ (about two minutes on the published data)
 python scripts/fit_eci.py
 
 # Fit from a local copy of the zip
 python scripts/fit_eci.py --input path/to/benchmark_data.zip
 
+# Longer chains
+python scripts/fit_eci.py --draws 8000 --chains 4
+
+# Also write the diagnostic suite to outputs/evaluation/
+python scripts/fit_eci.py --evaluate
+
+# Fit by least squares instead
+python scripts/fit_eci.py --method least-squares
+
 # With fewer bootstrap samples for a quicker run
-python scripts/fit_eci.py --bootstrap-samples 100
+python scripts/fit_eci.py --method least-squares --bootstrap-samples 100
 
 # Use numerical Jacobian (slower)
-python scripts/fit_eci.py --numeric-jacobian
-
-# Fit the Bayesian model instead (about a minute on the published data)
-python scripts/fit_eci.py --method bayesian
-python scripts/fit_eci.py --method bayesian --draws 8000 --chains 4
+python scripts/fit_eci.py --method least-squares --numeric-jacobian
 ```
+
+`--evaluate` scores a posterior, so it applies to the Bayesian fit only;
+passing it with `--method least-squares` is an error rather than a silent
+no-op.
 
 ### Python API
 
 ```python
-from eci import prepare_benchmark_data, fit_eci_model
+from eci import prepare_benchmark_data, fit_bayesian_eci
 
 df = prepare_benchmark_data()  # downloads benchmark_data.zip
-eci_df, edi_df, draws = fit_eci_model(df, bootstrap_samples=100)
+eci_df, edi_df, draws = fit_bayesian_eci(df)
 
 print(eci_df[["Model", "eci", "eci_ci_low", "eci_ci_high"]].head(10))
+```
+
+`fit_eci_model` is the least-squares fit and takes the same first argument,
+returning the same three objects:
+
+```python
+from eci import fit_eci_model
+
+eci_df, edi_df, draws = fit_eci_model(df, bootstrap_samples=100)
 ```
 
 Everything is returned on the ECI scale, defined by two anchor models
@@ -76,8 +99,9 @@ Everything is returned on the ECI scale, defined by two anchor models
   (`discriminability_scaled`), both with confidence intervals. Together
   they trace a benchmark's fitted curve: a model's predicted score is
   `sigmoid(discriminability_scaled * (eci - edi))`.
-- `draws`: the scaled bootstrap draws (model ECIs, benchmark difficulties
-  and slopes) plus the per-draw scale transforms.
+- `draws`: the scaled draws (model ECIs, benchmark difficulties and slopes)
+  plus the per-draw scale transforms — posterior draws from the Bayesian fit,
+  bootstrap draws from the least-squares one.
 
 Both fits carry the same interval columns, cut from their own draws: the
 least-squares fit takes quantiles of the bootstrap draws, the Bayesian fit
@@ -86,10 +110,10 @@ is re-anchored with its own scale transform, so the anchor models sit at
 exactly 130/150 in every draw; the anchors themselves get NaN intervals, being
 pinned by definition.
 
-### Bayesian fit
+### Bayesian fit (the default)
 
-`fit_bayesian_eci` fits the same curve with MCMC, returning the same three
-objects on the same ECI scale:
+`fit_bayesian_eci` fits the curve with MCMC, so every quantity comes out as a
+posterior distribution and the intervals are read straight off it:
 
 ```python
 from eci import prepare_benchmark_data, fit_bayesian_eci
@@ -141,8 +165,24 @@ each given as the `(mu, sigma)` of the underlying normal:
 from eci import BayesianPriors, fit_bayesian_eci
 
 priors = BayesianPriors(kappa=(np.log(50.0), 1.0))
-eci_df, edi_df, draws = fit_bayesian_eci(df, priors=priors, target_accept=0.95)
+eci_df, edi_df, draws = fit_bayesian_eci(df, priors=priors)
 ```
+
+The sampler runs 4 chains of 2000 tuning steps and 4000 draws at
+`target_accept=0.95`, and the item parameters are **centred** — drawn straight
+from their priors rather than as unit-scale offsets rescaled by their
+hyperparameter. `centred=False` (or `--non-centred`) switches to the other
+form. The two define the *same* posterior and differ only in the coordinates
+NUTS explores, so this is a sampling choice, not a modelling one.
+
+Which is better depends on the data, and the two settings interact: the
+centred geometry needs a smaller step size to get through the narrow part of
+the funnel, so it needs the higher `target_accept` to work at all. Measured on
+the published data, centred at 0.95 beats non-centred at 0.9 on every
+diagnostic — including `tau_cd`, the global scale, which is the slowest mixer
+and the first parameter to trip the convergence warning. **Retune
+`target_accept` within a parameterisation before comparing them**; holding it
+fixed makes centred look far worse than it is.
 
 ### Evaluating a fit
 
@@ -161,27 +201,29 @@ or from the command line, which writes the same thing to
 `<output-dir>/evaluation/`:
 
 ```bash
-python scripts/fit_eci.py --method bayesian --evaluate
+python scripts/fit_eci.py --evaluate
 ```
 
 It answers three separate questions, and the tables are written one CSV each
-alongside a `summary.txt` and a four-page `evaluation_report.pdf`:
+alongside a `summary.txt` and a two-page `evaluation_report.pdf`:
 
 | Table | What it tells you |
 | --- | --- |
 | **`metrics`** | **Every headline number, flat — read this one first** |
-| `sampler_summary`, `sampler_parameters` | Did NUTS work? Divergences, r-hat, ESS (bulk and tail), MCSE, BFMI |
+| `sampler_summary`, `sampler_parameters` | Divergences, r-hat, ESS (bulk and tail), MCSE, BFMI |
 | `accuracy` | Per benchmark: bias, the predictive SD the model claims, and `rmse_ratio` |
 | `loo_summary`, `loo_observations` | `elpd_loo`, `p_loo`, and the Pareto k of every observation |
-| `ppc` | Posterior predictive p-values for mean, sd, variance, IQR, min, max, skew and tail shares |
+| `ppc` | Posterior predictive p-values (mid-p) for mean, sd, variance, IQR, min, max, skew and tail shares |
 | `calibration`, `pit` | PIT per observation, coverage against nominal, KS test of uniformity |
 | `qq` | Arrays for the PIT-uniform and score QQ plots |
 
-The PDF is only those two QQ plots — they show something a table cannot,
-namely *where* on the score scale the fit departs from the data. Everything
-else is a number and lives in `metrics.csv`.
+The PDF is the metrics table, then the two QQ plots — the plots are there
+because they show something a table cannot, namely *where* on the score scale
+the fit departs from the data. Every number in it comes from `metrics.csv`,
+which also carries a `guide` column saying which direction is good and what
+value would mean the model is right.
 
-Four things to know before reading the numbers:
+Five things to know before reading the numbers:
 
 - **Per-benchmark RMSE is not reported, and should not be.** It is a
   restatement of `kappa`, which the fit already gives you: on the published
@@ -209,6 +251,12 @@ Four things to know before reading the numbers:
   against raw scores makes clipping look like miscalibration. On a correctly
   specified synthetic fit, 90% coverage reads 0.78 against raw scores and 0.96
   against clipped ones.
+- **The p-values are mid-p**, `P(T_rep > T_obs) + 0.5 * P(T_rep = T_obs)`.
+  The uncorrected `P(T_rep >= T_obs)` counts a tie as a disagreement, pinning
+  a statistic the model reproduces exactly at 1.0 instead of 0.5 — on the
+  published data that alone accounted for 78 of 115 apparently failing
+  per-benchmark checks, since a benchmark with no scores above 0.95 has
+  `T_obs = 0` and `P(T_rep >= 0) = 1` however the model behaves.
 - **Read the spread checks (sd, variance, IQR) per benchmark, not pooled.**
   Pooled across benchmarks they measure the spread of the fitted curve, which
   partial pooling deliberately shrinks, so the pooled p-value runs low even
@@ -223,13 +271,22 @@ every draw.
 
 `build_bayesian_model(df)` returns the `pm.Model` itself if you want to sample
 it differently or inspect it. Divergences and poor mixing are reported as
-warnings, not errors, so the draws are still returned for inspection. On the
-published data the default 4 chains x (2000 tune + 4000 draws) take about 90
-seconds and mix cleanly, except for the global scale `tau_cd`, which lands at
-r-hat 1.01-1.02 however long it tunes and so trips that warning now and then;
-it is a nuisance parameter, and every reported quantity sits at or below 1.01.
+warnings, not errors, so the draws are still returned for inspection.
 
-### Bootstrap
+On the published data the defaults take about two minutes and mix cleanly: 0
+divergences in 16,000 draws, 0 of 444 parameters above r-hat 1.01, minimum ESS
+586 bulk / 924 tail, minimum BFMI 0.85.
+
+### Least-squares fit
+
+`fit_eci_model` fits the same curve by least squares. It is identified
+differently: the anchor benchmark's discriminability is pinned to fix the
+multiplicative scale and an L2 penalty resolves the remaining translation
+freedom, where the Bayesian fit uses its two sum-to-zero constraints. Its
+intervals come from a bootstrap rather than a posterior. It is the faster of the two and needs no MCMC diagnostics, but it
+reports no `kappa`, has no per-observation noise model, and there is no
+diagnostic suite for it — `--evaluate` is Bayesian-only. `edi_df` carries an
+`is_anchor` column marking the pinned benchmark.
 
 Bootstrap resampling holds the set of models fixed and resamples each
 model's benchmark results with replacement. Any fit — central or bootstrap —

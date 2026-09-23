@@ -28,13 +28,12 @@ dependencies = [
     "pandas>=2.0",
     "scipy>=1.10",
     "tqdm>=4.60",
-]
-
-[project.optional-dependencies]
-bayesian = [
+    # The Bayesian fit is the default, so its dependencies are not optional
     "pymc>=5.15",
     "arviz>=0.18",
 ]
+
+[project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

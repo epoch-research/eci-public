@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-pytest.importorskip("pymc", reason="the Bayesian fit needs the [bayesian] extra")
+pytest.importorskip("pymc", reason="PyMC is required; reinstall with pip install -e .")
 
 from eci.bayesian import fit_bayesian_eci  # noqa: E402
 from eci.evaluation import (  # noqa: E402

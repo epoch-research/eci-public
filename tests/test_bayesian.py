@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from scipy.stats import spearmanr
 
-pytest.importorskip("pymc", reason="the Bayesian fit needs the [bayesian] extra")
+pytest.importorskip("pymc", reason="PyMC is required; reinstall with pip install -e .")
 
 import pymc as pm  # noqa: E402
 
