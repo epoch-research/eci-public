@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Fit ECI model and save scores to outputs directory.
+Fit ECI model and save scores to outputs directory. 
+
+Defaults to the Bayesian fit using pymc, but can also run the 
+least-squares fit (deprecated) for reproducing old results.
 
 Usage:
     python scripts/fit_eci.py

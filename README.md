@@ -11,13 +11,15 @@ to a table of benchmark scores, estimating:
 - **Discriminabilities**: one slope per benchmark, governing how sharply
   scores rise as capability increases
 
-Two fits are available: a Bayesian one (the default) that treats the curve as
-the *mean* of a per-observation Beta likelihood and infers a full posterior
-over its parameters by MCMC, with intervals read straight off that posterior;
-and a least-squares one, now deprecated/historical, that fits the curve
-directly by minimizing its distance to the observed scores, with bootstrap
-confidence intervals. See [Bayesian fit](#bayesian-fit-the-default) and
-[Least-squares fit (deprecated)](#least-squares-fit-deprecated).
+Two fits are available: 
+1. A least-squares one that fits the curve directly, by minimizing its 
+distance to the observed scores, with bootstrap confidence intervals; and 
+2. A Bayesian one (the default) that treats the IRT curve as the *mean* 
+of a per-observation Beta likelihood and infers a full posterior over its 
+parameters by MCMC, with intervals read straight off that posterior.
+
+See [Bayesian fit](#bayesian-fit-the-default) and
+[Least-squares fit](#least-squares-fit).
 
 For details on the methodology, see:
 - **Paper**: [A Rosetta Stone for AI Benchmarks](https://arxiv.org/abs/2512.00193)
@@ -59,7 +61,7 @@ python scripts/fit_eci.py --draws 8000 --chains 4
 # Also write the diagnostic suite to outputs/evaluation/
 python scripts/fit_eci.py --evaluate
 
-# Fit by least squares instead
+# Fit by frequentist approach (least squares error) instead
 python scripts/fit_eci.py --method least-squares
 
 # With fewer bootstrap samples for a quicker run
@@ -70,8 +72,7 @@ python scripts/fit_eci.py --method least-squares --numeric-jacobian
 ```
 
 `--evaluate` scores a posterior, so it applies to the Bayesian fit only;
-passing it with `--method least-squares` is an error rather than a silent
-no-op.
+passing it with `--method least-squares` raises an error.
 
 ### Python API
 
@@ -173,21 +174,15 @@ priors = BayesianPriors(kappa=(np.log(50.0), 1.0))
 eci_df, edi_df, draws = fit_bayesian_eci(df, priors=priors)
 ```
 
-The sampler runs 4 chains of 2000 tuning steps and 4000 draws at
+The sampler runs a default 4 chains of 2000 tuning steps and 4000 draws at
 `target_accept=0.95`, and the item parameters are **centred** — drawn straight
 from their priors rather than as unit-scale offsets rescaled by their
 hyperparameter. `centred=False` (or `--non-centred`) switches to the other
-form. The two define the *same* posterior and differ only in the coordinates
-NUTS explores, so this is a sampling choice, not a modelling one.
+form. This may be useful for different priors but with the default priors, 
+parameters should stay centered. Note that the two parametrisations define the 
+*same* posterior and differ only in the coordinates NUTS explores, so this 
+is a sampling choice, not a modelling one.
 
-Which is better depends on the data, and the two settings interact: the
-centred geometry needs a smaller step size to get through the narrow part of
-the funnel, so it needs the higher `target_accept` to work at all. Measured on
-the published data, centred at 0.95 beats non-centred at 0.9 on every
-diagnostic — including `tau_cd`, the global scale, which is the slowest mixer
-and the first parameter to trip the convergence warning. **Retune
-`target_accept` within a parameterisation before comparing them**; holding it
-fixed makes centred look far worse than it is.
 
 ### Evaluating a fit
 
@@ -224,7 +219,7 @@ written to disk:
 
 | Table | What it tells you |
 | --- | --- |
-| **`metrics`** | **Every headline number, flat — the PDF's page 1** |
+| **`metrics`** | **Every headline number, flat — read this one first** |
 | `sampler_summary`, `sampler_parameters` | Divergences, r-hat, ESS (bulk and tail), MCSE, BFMI |
 | `accuracy` | Per benchmark: bias, the predictive SD the model claims, and `rmse_ratio` |
 | `loo_summary`, `loo_observations` | `elpd_loo`, `p_loo`, and the Pareto k of every observation |
@@ -232,6 +227,12 @@ written to disk:
 | `calibration`, `pit` | PIT per observation, coverage against nominal, KS test of uniformity |
 | `forest` | Per benchmark: posterior mean and 90% HDI of `kappa` and `difficulty` — the PDF's page 3 |
 | `qq` | Arrays for the PIT-uniform and score QQ plots |
+
+The PDF is the metrics table, then the two QQ plots — the plots are there
+because they show something a table cannot, namely *where* on the score scale
+the fit departs from the data. Every number in it comes from `metrics.csv`,
+which also carries a `guide` column saying which direction is good and what
+value would mean the model is right.
 
 Five things to know before reading the numbers:
 
@@ -297,10 +298,11 @@ for reproducing old results.
 differently: the anchor benchmark's discriminability is pinned to fix the
 multiplicative scale and an L2 penalty resolves the remaining translation
 freedom, where the Bayesian fit uses its two sum-to-zero constraints. Its
-intervals come from a bootstrap rather than a posterior. It is the faster of the two and needs no MCMC diagnostics, but it
-reports no `kappa`, has no per-observation noise model, and there is no
-diagnostic suite for it — `--evaluate` is Bayesian-only. `edi_df` carries an
-`is_anchor` column marking the pinned benchmark.
+intervals come from a bootstrap rather than a posterior. It is the faster 
+of the two and needs no MCMC diagnostics, but it reports no `kappa`, has 
+no per-observation noise model, and there is no diagnostic suite for it 
+— `--evaluate` is Bayesian-only. `edi_df` carries an `is_anchor` column 
+marking the pinned benchmark.
 
 Bootstrap resampling holds the set of models fixed and resamples each
 model's benchmark results with replacement. Any fit — central or bootstrap —

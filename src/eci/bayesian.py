@@ -1,11 +1,10 @@
 """
 Bayesian fitting for the Epoch Capabilities Index (ECI).
 
-Implements the same IRT curve as :mod:`eci.fitting`, but as the mean of a
-per-observation Beta likelihood sampled by MCMC rather than fit directly, so
-every quantity comes out as a posterior distribution. See the README's
-"Bayesian fit" section for the model, the priors, the centred/non-centred
-sampling choice, and how results are mapped onto the ECI scale.
+Implements the IRT curve as the mean of a per-observation Beta 
+likelihood sampled by MCMC. See the README's "Bayesian fit" section 
+for the model, the priors, the centred/non-centred sampling choice, 
+and how results are mapped onto the ECI scale.
 
 Besides the priors dataclass, two public entry points do the work:
 :func:`build_bayesian_model` assembles the plain ``pm.Model`` (coordinates,
@@ -179,7 +178,7 @@ def build_bayesian_model(
         centred: sample the item parameters directly (the default), or, when
             False, as unit-scale offsets rescaled by their hyperparameter.
             The two define the *same* posterior and differ only in the
-            coordinates NUTS explores; see the module docstring.
+            coordinates NUTS explores.
 
     Returns:
         A ``pm.Model`` whose coordinates are the model and benchmark *names*
