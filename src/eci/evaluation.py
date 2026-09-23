@@ -34,7 +34,11 @@ Typical use is through the fit itself::
     results = draws["evaluation"]
     save_evaluation(results, "outputs/evaluation")
 
-``save_evaluation`` writes one CSV per table plus a multi-page PDF report.
+``save_evaluation`` writes the two-page PDF report. Everything it draws on -
+the per-parameter, per-benchmark and per-observation breakdowns - stays
+available as dataframes in the returned dict (see :func:`evaluate_fit`) for
+drilling into a number the PDF flags; it just isn't written to disk by
+default.
 """
 
 from pathlib import Path
@@ -784,8 +788,8 @@ def _draw_metrics_page(fig, metrics: pd.DataFrame) -> None:
 def plot_evaluation(results: dict, path: "str | Path") -> Path:
     """Write the evaluation as a two-page PDF (needs matplotlib).
 
-    Page 1 is the metrics table — every headline number, the same content as
-    ``metrics.csv``. Page 2 is the two QQ plots, which are here because they
+    Page 1 is the metrics table — every headline number, i.e. ``results["metrics"]``.
+    Page 2 is the two QQ plots, which are here because they
     show something a table cannot: *where* on the score scale the fit departs
     from the data.
     """
@@ -839,31 +843,19 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
     return path
 
 
-def save_evaluation(results: dict, output_dir: "str | Path", plots: bool = True) -> list[Path]:
+def save_evaluation(results: dict, output_dir: "str | Path") -> list[Path]:
     """
-    Write every table as a CSV, the headline numbers as a text summary, and
-    (unless ``plots=False``) the metrics table and QQ plots as
-    ``evaluation_report.pdf``.
+    Write the evaluation as ``evaluation_report.pdf``: the metrics table plus
+    the two QQ plots (see :func:`plot_evaluation`).
 
-    ``metrics.csv`` is the one to read first: every headline number, flat.
+    The tables behind it - sampler parameters, per-benchmark accuracy, LOO,
+    posterior predictive checks, calibration, PIT - are not written to disk;
+    they're in the ``results`` dict returned by :func:`evaluate_fit` (and
+    ``summarise_evaluation(results)`` for a terminal-readable version) for
+    when a headline number needs drilling into.
 
-    Returns the paths written.
+    Returns the paths written (currently just the one PDF).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    written = []
-    for name, table in results.items():
-        if not isinstance(table, pd.DataFrame):
-            continue  # qq holds plotting arrays, not a table
-        destination = output_dir / f"{name}.csv"
-        table.to_csv(destination, index=False)
-        written.append(destination)
-
-    summary_path = output_dir / "summary.txt"
-    summary_path.write_text(summarise_evaluation(results) + "\n")
-    written.append(summary_path)
-
-    if plots:
-        written.append(plot_evaluation(results, output_dir / "evaluation_report.pdf"))
-    return written
+    return [plot_evaluation(results, output_dir / "evaluation_report.pdf")]

@@ -51,7 +51,8 @@ def main():
         choices=["bayesian", "least-squares"],
         default="bayesian",
         help="Fitting method: Bayesian MCMC with posterior credible intervals "
-             "(default), or least squares with bootstrap CIs",
+             "(default), or least squares with bootstrap CIs (deprecated/"
+             "historical - kept for reproducing old results)",
     )
     parser.add_argument(
         "--output-dir",
@@ -91,8 +92,8 @@ def main():
         "--evaluate",
         action="store_true",
         help="Also run the diagnostic suite (convergence, accuracy, LOO, "
-             "calibration, posterior predictive checks) and write it, with a "
-             "PDF of plots, to <output-dir>/evaluation/",
+             "calibration, posterior predictive checks) and write it as a "
+             "PDF report to <output-dir>/evaluation/",
     )
 
     least_squares = parser.add_argument_group("least-squares options")
@@ -185,8 +186,8 @@ def main():
 
         evaluation = draws["evaluation"]
         written = save_evaluation(evaluation, args.output_dir / "evaluation")
-        print(f"\nSaved {len(written)} evaluation files to "
-              f"{args.output_dir / 'evaluation'}")
+        for path in written:
+            print(f"\nSaved evaluation report to {path}")
         print("\n=== Evaluation ===")
         print(summarise_evaluation(evaluation))
 

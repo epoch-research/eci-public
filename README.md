@@ -1,6 +1,6 @@
 # ECI: Epoch Capabilities Index
 
-This package fits the ECI model,
+This package fits the ECI model, whose core is the IRT curve
 
     performance = sigmoid(discriminability * (capability - difficulty))
 
@@ -11,11 +11,13 @@ to a table of benchmark scores, estimating:
 - **Discriminabilities**: one slope per benchmark, governing how sharply
   scores rise as capability increases
 
-Two fits of that curve are available: a Bayesian one fitted by MCMC (the
-default), whose intervals come straight from the posterior, and a
-least-squares one with bootstrap confidence intervals. See
-[Bayesian fit](#bayesian-fit-the-default) and
-[Least-squares fit](#least-squares-fit).
+Two fits are available: a Bayesian one (the default) that treats the curve as
+the *mean* of a per-observation Beta likelihood and infers a full posterior
+over its parameters by MCMC, with intervals read straight off that posterior;
+and a least-squares one, now deprecated/historical, that fits the curve
+directly by minimizing its distance to the observed scores, with bootstrap
+confidence intervals. See [Bayesian fit](#bayesian-fit-the-default) and
+[Least-squares fit (deprecated)](#least-squares-fit-deprecated).
 
 For details on the methodology, see:
 - **Paper**: [A Rosetta Stone for AI Benchmarks](https://arxiv.org/abs/2512.00193)
@@ -112,8 +114,11 @@ pinned by definition.
 
 ### Bayesian fit (the default)
 
-`fit_bayesian_eci` fits the curve with MCMC, so every quantity comes out as a
-posterior distribution and the intervals are read straight off it:
+`fit_bayesian_eci` infers the curve's parameters by MCMC rather than fitting
+the curve directly: the curve is the mean of a per-observation Beta
+likelihood (below), and what's sampled is the posterior over that likelihood's
+parameters. Every quantity comes out as a posterior distribution and the
+intervals are read straight off it:
 
 ```python
 from eci import prepare_benchmark_data, fit_bayesian_eci
@@ -204,24 +209,26 @@ or from the command line, which writes the same thing to
 python scripts/fit_eci.py --evaluate
 ```
 
-It answers three separate questions, and the tables are written one CSV each
-alongside a `summary.txt` and a two-page `evaluation_report.pdf`:
+`save_evaluation` writes a single file, `evaluation_report.pdf`: the metrics
+table, then the two QQ plots — the plots are there because they show something
+a table cannot, namely *where* on the score scale the fit departs from the
+data. The metrics table carries a `guide` column saying which direction is
+good and what value would mean the model is right.
+
+The suite answers three separate questions, and `draws["evaluation"]` (what
+`save_evaluation` is given) keeps every table behind those headline numbers as
+a dataframe, for drilling into one that the PDF flags — none of these are
+written to disk:
 
 | Table | What it tells you |
 | --- | --- |
-| **`metrics`** | **Every headline number, flat — read this one first** |
+| **`metrics`** | **Every headline number, flat — the PDF's page 1** |
 | `sampler_summary`, `sampler_parameters` | Divergences, r-hat, ESS (bulk and tail), MCSE, BFMI |
 | `accuracy` | Per benchmark: bias, the predictive SD the model claims, and `rmse_ratio` |
 | `loo_summary`, `loo_observations` | `elpd_loo`, `p_loo`, and the Pareto k of every observation |
 | `ppc` | Posterior predictive p-values (mid-p) for mean, sd, variance, IQR, min, max, skew and tail shares |
 | `calibration`, `pit` | PIT per observation, coverage against nominal, KS test of uniformity |
 | `qq` | Arrays for the PIT-uniform and score QQ plots |
-
-The PDF is the metrics table, then the two QQ plots — the plots are there
-because they show something a table cannot, namely *where* on the score scale
-the fit departs from the data. Every number in it comes from `metrics.csv`,
-which also carries a `guide` column saying which direction is good and what
-value would mean the model is right.
 
 Five things to know before reading the numbers:
 
@@ -277,7 +284,11 @@ On the published data the defaults take about two minutes and mix cleanly: 0
 divergences in 16,000 draws, 0 of 444 parameters above r-hat 1.01, minimum ESS
 586 bulk / 924 tail, minimum BFMI 0.85.
 
-### Least-squares fit
+### Least-squares fit (deprecated)
+
+Deprecated/historical: this predates the Bayesian fit above, which is now
+the default and the one to use for new work. It's kept for reference and
+for reproducing old results.
 
 `fit_eci_model` fits the same curve by least squares. It is identified
 differently: the anchor benchmark's discriminability is pinned to fix the

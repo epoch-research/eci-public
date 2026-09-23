@@ -1,6 +1,11 @@
 """
 Fitting for the Epoch Capabilities Index (ECI).
 
+Deprecated/historical: this least-squares fit predates the Bayesian one in
+``eci.bayesian``, which is now the default and the one to use. It is kept
+for reference and for reproducing old results, not for new work - it has no
+per-observation noise model, no `kappa`, and no diagnostic suite.
+
 The model assumes benchmark performance follows a logistic curve:
 
     performance = sigmoid(discriminability * (capability - difficulty))
@@ -132,6 +137,10 @@ def fit_eci_model(
 ) -> tuple[pd.DataFrame, pd.DataFrame, "dict | None"]:
     """
     Fit the IRT model and return ECI-scale scores with bootstrap CIs.
+
+    Deprecated/historical: prefer :func:`eci.bayesian.fit_bayesian_eci`,
+    which is now the default fit. This one is kept for reference and for
+    reproducing old results.
 
     Args:
         df: DataFrame with columns model_id, benchmark_id, performance,

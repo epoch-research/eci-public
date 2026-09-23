@@ -8,7 +8,9 @@ and benchmark discriminabilities (how sharply scores rise with capability).
 Two fits of the same curve are available: the Bayesian one in
 ``eci.bayesian`` (``fit_bayesian_eci``, posterior credible intervals), which
 is the default, and the least-squares one in ``eci.fitting``
-(``fit_eci_model``, bootstrap confidence intervals).
+(``fit_eci_model``, bootstrap confidence intervals). The least-squares fit
+is deprecated/historical - kept for reference and reproducing old results,
+not for new work.
 """
 
 from .fitting import fit_eci_model

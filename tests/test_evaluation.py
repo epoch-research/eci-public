@@ -210,23 +210,12 @@ class TestCalibration:
 
 
 class TestSaving:
-    def test_writes_a_csv_per_table_plus_summary_and_plots(self, evaluated, tmp_path):
+    def test_writes_only_the_pdf_report(self, evaluated, tmp_path):
         results, _ = evaluated
         written = save_evaluation(results, tmp_path)
         names = {path.name for path in written}
-        assert "summary.txt" in names
-        assert "evaluation_report.pdf" in names
-        assert "metrics.csv" in names
-        assert "sampler_summary.csv" in names and "ppc.csv" in names
+        assert names == {"evaluation_report.pdf"}
         assert all(path.exists() and path.stat().st_size > 0 for path in written)
-        # the qq arrays are for plotting, not a table
-        assert "qq.csv" not in names
-        assert pd.read_csv(tmp_path / "accuracy.csv").shape[0] == N_BENCHMARKS
-
-    def test_plots_can_be_skipped(self, evaluated, tmp_path):
-        results, _ = evaluated
-        written = save_evaluation(results, tmp_path, plots=False)
-        assert not any(path.suffix == ".pdf" for path in written)
 
     def test_summary_mentions_each_section(self, evaluated):
         results, _ = evaluated

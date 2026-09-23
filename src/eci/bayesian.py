@@ -5,8 +5,12 @@ Same IRT curve as :mod:`eci.fitting`,
 
     performance = sigmoid(slope * (capability - difficulty))
 
-but fitted by MCMC rather than least squares, so every quantity comes out as
-a posterior distribution and the intervals are read straight off it.
+but unlike :mod:`eci.fitting`, this module does not fit that curve directly
+by minimizing its distance to the observed scores. Instead the curve is the
+*mean* of a per-observation Beta likelihood, and MCMC samples the posterior
+over the likelihood's parameters (including ``kappa``, which has no
+counterpart in the curve itself). Every quantity comes out as a posterior
+distribution and the intervals are read straight off it.
 
 The observed scores live in [0, 1], so the likelihood is a Beta with a
 per-benchmark concentration ``kappa``:
