@@ -1,45 +1,21 @@
 """
 Evaluation suite for the Bayesian ECI fit.
 
-Answers three separate questions, which are easy to conflate:
-
-1. *Did the sampler work?* r_hat, effective sample size, divergences, BFMI.
-   A failure here invalidates everything else, so read it first.
-2. *Does the fitted curve predict the scores?* RMSE and MAE, both in-sample
-   and leave-one-out weighted, overall and per benchmark.
-3. *Is the model's uncertainty honest?* Posterior predictive p-values on the
-   mean, spread and tails; PIT calibration and coverage; QQ arrays.
-
-Every metric is reported per benchmark with an ``OVERALL`` row, so a single
-badly behaved benchmark cannot hide inside a pooled number.
-
-Two different observed vectors are in play, and mixing them up quietly breaks
-the calibration numbers. Accuracy is scored against the **raw** scores, since
-that is the error a user of the index would actually see. The distributional
-checks - posterior predictive p-values, PIT, coverage, QQ - are scored against
-the **clipped** scores the likelihood was fitted to: the model was never shown
-a score of exactly 0 or 1 and cannot be asked to have predicted one. Scoring
-those checks against the raw scores makes the clipping masquerade as
-miscalibration (measured on a correctly specified synthetic fit: 90% coverage
-reads 0.78 against raw scores and 0.96 against clipped ones).
-
-The per-observation work (posterior predictive, PIT, QQ, LOO) runs on a thinned
-subsample of the draws - see ``max_draws`` - because those arrays are
-(draws x observations) and the full trace makes them needlessly large. The
-sampler diagnostics always use every draw.
+Convergence, predictive accuracy, leave-one-out and calibration checks each
+get their own function - :func:`sampler_diagnostics`,
+:func:`predictive_accuracy`, :func:`loo_diagnostics`,
+:func:`posterior_predictive_checks`, :func:`calibration`, :func:`qq_data`,
+:func:`benchmark_forest_data` - so each can be run and tested alone.
+:func:`evaluate_fit` runs all of them against a fitted trace and flattens the
+headline numbers into one metrics table; :func:`save_evaluation` renders the
+result as the three-page PDF report. See the README's "Evaluating a fit"
+section for what each metric means, the raw-vs-clipped scoring split, and
+what's saved to disk versus kept in the returned dict only.
 
 Typical use is through the fit itself::
 
     eci_df, edi_df, draws = fit_bayesian_eci(df, evaluate=True)
-    results = draws["evaluation"]
-    save_evaluation(results, "outputs/evaluation")
-
-``save_evaluation`` writes the three-page PDF report - metrics, QQ plots, and
-a forest plot of every benchmark's ``kappa`` and ``difficulty``. Everything it
-draws on - the per-parameter, per-benchmark and per-observation breakdowns -
-stays available as dataframes in the returned dict (see :func:`evaluate_fit`)
-for drilling into a number the PDF flags; it just isn't written to disk by
-default.
+    save_evaluation(draws["evaluation"], "outputs/evaluation")
 """
 
 from pathlib import Path
@@ -233,7 +209,9 @@ def sampler_diagnostics(
     stats_group = trace.sample_stats
     n_draws = int(stats_group.sizes["chain"] * stats_group.sizes["draw"])
     divergences = int(stats_group["diverging"].sum()) if "diverging" in stats_group else 0
-    bfmi = np.asarray(az.bfmi(trace))
+    # arviz>=1.0 returns bfmi as a one-group DataTree; the per-chain values
+    # are its "energy" variable (the name is a holdover, not raw NUTS energy).
+    bfmi = az.bfmi(trace)["energy"].to_numpy()
 
     summary = {
         "n_chains": int(stats_group.sizes["chain"]),
@@ -353,11 +331,12 @@ def loo_diagnostics(
     _require_group(trace, "log_likelihood")
     loo = az.loo(trace, pointwise=True)
     pareto_k = np.asarray(loo.pareto_k)
-    elpd_i = np.asarray(loo.loo_i)
+    elpd_i = np.asarray(loo.elpd_i)
 
-    log_likelihood = _flatten(trace.log_likelihood["obs"])  # (n_draws, n_obs)
-    log_weights, _ = az.psislw(-log_likelihood.T)
-    weights = np.exp(log_weights)
+    # loo(pointwise=True) already carries the PSIS log importance weights
+    # (n_obs, chain, draw); flatten chain/draw the same way _flatten does
+    # elsewhere and transpose to match the (n_obs, n_draws) shape below.
+    weights = np.exp(_flatten(loo.log_weights).T)
 
     counts = {}
     previous = -np.inf
@@ -367,9 +346,9 @@ def loo_diagnostics(
     counts["pareto_k_very_bad"] = int((pareto_k > PARETO_K_BANDS[-1][0]).sum())
 
     summary = pd.DataFrame([{
-        "elpd_loo": float(loo.elpd_loo),
+        "elpd_loo": float(loo.elpd),
         "se": float(loo.se),
-        "p_loo": float(loo.p_loo),
+        "p_loo": float(loo.p),
         "n_obs": int(len(elpd_i)),
         "max_pareto_k": float(pareto_k.max()),
         **counts,
@@ -553,16 +532,17 @@ def benchmark_forest_data(trace: az.InferenceData, hdi_prob: float = 0.90) -> pd
     lives in :mod:`eci.bayesian` and isn't available here - this is a
     diagnostic view of the fit's own parameters, not the published scores.
     """
-    hdi = az.hdi(trace, var_names=["kappa", "difficulty"], hdi_prob=hdi_prob)
-    mean = trace.posterior[["kappa", "difficulty"]].mean(dim=("chain", "draw"))
+    posterior = trace.posterior.dataset[["kappa", "difficulty"]]
+    hdi = az.hdi(posterior, prob=hdi_prob)
+    mean = posterior.mean(dim=("chain", "draw"))
     forest = pd.DataFrame({
         "benchmark": trace.posterior.coords["benchmark"].values,
         "kappa_mean": mean["kappa"].values,
-        "kappa_lo": hdi["kappa"].sel(hdi="lower").values,
-        "kappa_hi": hdi["kappa"].sel(hdi="higher").values,
+        "kappa_lo": hdi["kappa"].sel(ci_bound="lower").values,
+        "kappa_hi": hdi["kappa"].sel(ci_bound="upper").values,
         "difficulty_mean": mean["difficulty"].values,
-        "difficulty_lo": hdi["difficulty"].sel(hdi="lower").values,
-        "difficulty_hi": hdi["difficulty"].sel(hdi="higher").values,
+        "difficulty_lo": hdi["difficulty"].sel(ci_bound="lower").values,
+        "difficulty_hi": hdi["difficulty"].sel(ci_bound="upper").values,
     })
     return forest.sort_values("difficulty_mean").reset_index(drop=True)
 

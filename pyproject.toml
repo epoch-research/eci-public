@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "ECI (Epoch Capabilities Index) fitting for LLM benchmark evaluation"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [
     { name = "Epoch AI", email = "info@epoch.ai" }
 ]
@@ -18,8 +18,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -28,9 +26,15 @@ dependencies = [
     "pandas>=2.0",
     "scipy>=1.10",
     "tqdm>=4.60",
-    # The Bayesian fit is the default, so its dependencies are not optional
-    "pymc>=5.15",
-    "arviz>=0.18",
+    # The Bayesian fit is the default, so its dependencies are not optional.
+    # arviz>=1.0 replaced InferenceData with xarray's DataTree and renamed
+    # several stats functions' arguments/return attributes (bfmi, loo, hdi);
+    # the evaluation suite uses that new API and no longer runs on arviz<1.0.
+    "pymc>=6.0",
+    "arviz>=1.0",
+    # arviz>=1.0 made matplotlib an optional plotting backend rather than a
+    # hard dependency; eci.evaluation imports it directly for the PDF report.
+    "matplotlib>=3.5",
 ]
 
 [project.optional-dependencies]

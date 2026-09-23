@@ -331,9 +331,7 @@ def fit_bayesian_eci(
         evaluation_max_draws: draws the evaluation thins down to for its
             per-observation metrics.
         progressbar: show the sampling progress bar.
-        sampler_kwargs: extra keyword arguments forwarded to ``pm.sample``,
-            e.g. ``{"idata_kwargs": {"log_likelihood": True}}`` to keep the
-            pointwise log likelihood for ``az.loo``.
+        sampler_kwargs: extra keyword arguments forwarded to ``pm.sample``.
 
     Returns:
         (eci_df, edi_df, draws), everything on the ECI scale:
@@ -368,12 +366,6 @@ def fit_bayesian_eci(
         raise ValueError(f"Anchor model not found in data: {e}") from None
 
     sample_kwargs = dict(sampler_kwargs or {})
-    if evaluate:
-        # LOO needs the pointwise log likelihood, which PyMC does not keep by
-        # default because it is one number per draw per observation.
-        sample_kwargs["idata_kwargs"] = {
-            **sample_kwargs.get("idata_kwargs", {}), "log_likelihood": True
-        }
 
     pymc_model = build_bayesian_model(df, priors, performance_clip_eps, centred)
     with pymc_model:
@@ -387,6 +379,12 @@ def fit_bayesian_eci(
             **sample_kwargs,
         )
         if evaluate:
+            # LOO needs the pointwise log likelihood, which PyMC does not
+            # keep by default because it is one number per draw per
+            # observation.
+            pm.compute_log_likelihood(
+                trace, extend_inferencedata=True, progressbar=progressbar
+            )
             pm.sample_posterior_predictive(
                 trace,
                 extend_inferencedata=True,
