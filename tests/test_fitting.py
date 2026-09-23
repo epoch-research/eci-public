@@ -10,6 +10,7 @@ and verify that the fitted scores match:
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.sparse import lil_matrix
 from scipy.stats import spearmanr
 
 from eci import fit_eci_model, prepare_benchmark_data
@@ -339,7 +340,6 @@ def _irt_jacobian_loop_reference(
     anchor_idx, n_models, n_benchmarks, regularization_strength,
 ):
     """Loop-based Jacobian assembly used as the verification reference."""
-    from scipy.sparse import lil_matrix
 
     def sigmoid(x):
         return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))

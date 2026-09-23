@@ -13,41 +13,27 @@ is deprecated/historical - kept for reference and reproducing old results,
 not for new work.
 """
 
-from .fitting import fit_eci_model
+from .bayesian import BayesianPriors, build_bayesian_model, fit_bayesian_eci
 from .dataloader import (
-    prepare_benchmark_data,
     download_benchmark_data,
     load_benchmark_metadata,
     load_model_metadata,
+    prepare_benchmark_data,
 )
-
-# Served lazily: importing PyMC costs seconds, and callers that only load data
-# or run the least-squares fit should not pay it
-_LAZY_EXPORTS = {
-    "fit_bayesian_eci": "bayesian",
-    "build_bayesian_model": "bayesian",
-    "BayesianPriors": "bayesian",
-    "evaluate_fit": "evaluation",
-    "summarise_evaluation": "evaluation",
-    "save_evaluation": "evaluation",
-}
+from .evaluation import evaluate_fit, save_evaluation, summarise_evaluation
+from .fitting import fit_eci_model
 
 __all__ = [
-    "fit_eci_model",
-    "prepare_benchmark_data",
+    "BayesianPriors",
+    "build_bayesian_model",
     "download_benchmark_data",
+    "evaluate_fit",
+    "fit_bayesian_eci",
+    "fit_eci_model",
     "load_benchmark_metadata",
     "load_model_metadata",
-    *sorted(_LAZY_EXPORTS),
+    "prepare_benchmark_data",
+    "save_evaluation",
+    "summarise_evaluation",
 ]
 __version__ = "0.2.0"
-
-
-def __getattr__(name: str):
-    """Import the Bayesian fit and its evaluation suite on first use, so
-    ``import eci`` stays cheap for callers that never touch them."""
-    if name in _LAZY_EXPORTS:
-        from importlib import import_module
-
-        return getattr(import_module(f".{_LAZY_EXPORTS[name]}", __name__), name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

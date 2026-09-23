@@ -21,8 +21,14 @@ Typical use is through the fit itself::
 from pathlib import Path
 
 import arviz as az
+import matplotlib
+
+matplotlib.use("Agg")  # must precede importing pyplot
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.backends.backend_pdf import PdfPages
 from scipy import stats
 
 # Parameters the diagnostics summarise. The model's unit-scale offsets
@@ -821,12 +827,6 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
     ``difficulty`` (posterior mean and 90% HDI, from ``results["forest"]``) -
     the per-benchmark item parameters, visually, in place of a CSV.
     """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_pdf import PdfPages
-
     path = Path(path)
     qq = results["qq"]
     forest = results["forest"]

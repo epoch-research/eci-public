@@ -16,7 +16,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from eci import fit_eci_model, prepare_benchmark_data
+from eci import (
+    fit_bayesian_eci,
+    fit_eci_model,
+    prepare_benchmark_data,
+    save_evaluation,
+    summarise_evaluation,
+)
 from eci.dataloader import BENCHMARK_DATA_URL
 
 
@@ -123,8 +129,6 @@ def main():
     print(f"  {df['model_id'].nunique()} models, {df['benchmark_id'].nunique()} benchmarks")
 
     if args.method == "bayesian":
-        from eci import fit_bayesian_eci
-
         print(f"\nFitting Bayesian IRT model ({args.chains} chains, "
               f"{args.draws} draws, {args.tune} tuning steps)...")
         eci_df, edi_df, draws = fit_bayesian_eci(
@@ -182,8 +186,6 @@ def main():
     print(f"Saved EDI scores to {edi_output}")
 
     if args.method == "bayesian" and args.evaluate:
-        from eci import save_evaluation, summarise_evaluation
-
         evaluation = draws["evaluation"]
         written = save_evaluation(evaluation, args.output_dir / "evaluation")
         for path in written:
