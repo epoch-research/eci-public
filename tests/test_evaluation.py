@@ -37,7 +37,7 @@ class TestEvaluationWiring:
         results, _ = evaluated
         assert set(results) == {
             "sampler_summary", "sampler_parameters", "accuracy", "loo_summary",
-            "loo_observations", "ppc", "calibration", "pit", "qq", "metrics",
+            "loo_observations", "ppc", "calibration", "pit", "forest", "qq", "metrics",
         }
 
     def test_fit_without_evaluate_has_no_evaluation(self, truth):
@@ -207,6 +207,23 @@ class TestCalibration:
         assert np.all(np.diff(qq["pit_sorted"]) >= 0)
         assert (qq["replicated_ci_low"] <= qq["replicated_ci_high"]).all()
         assert len(qq["observed_quantiles"]) == len(qq["quantile_levels"])
+
+
+class TestForest:
+    def test_one_row_per_benchmark_sorted_by_difficulty(self, evaluated):
+        results, _ = evaluated
+        forest = results["forest"]
+        assert len(forest) == N_BENCHMARKS
+        assert forest["difficulty_mean"].is_monotonic_increasing
+
+    def test_intervals_bracket_the_mean(self, evaluated):
+        results, _ = evaluated
+        forest = results["forest"]
+        assert (forest["kappa_lo"] <= forest["kappa_mean"]).all()
+        assert (forest["kappa_mean"] <= forest["kappa_hi"]).all()
+        assert (forest["difficulty_lo"] <= forest["difficulty_mean"]).all()
+        assert (forest["difficulty_mean"] <= forest["difficulty_hi"]).all()
+        assert (forest["kappa_lo"] > 0).all()  # kappa is a concentration
 
 
 class TestSaving:

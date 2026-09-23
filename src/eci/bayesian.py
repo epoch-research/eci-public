@@ -1,73 +1,22 @@
 """
 Bayesian fitting for the Epoch Capabilities Index (ECI).
 
-Same IRT curve as :mod:`eci.fitting`,
+Implements the same IRT curve as :mod:`eci.fitting`, but as the mean of a
+per-observation Beta likelihood sampled by MCMC rather than fit directly, so
+every quantity comes out as a posterior distribution. See the README's
+"Bayesian fit" section for the model, the priors, the centred/non-centred
+sampling choice, and how results are mapped onto the ECI scale.
 
-    performance = sigmoid(slope * (capability - difficulty))
-
-but unlike :mod:`eci.fitting`, this module does not fit that curve directly
-by minimizing its distance to the observed scores. Instead the curve is the
-*mean* of a per-observation Beta likelihood, and MCMC samples the posterior
-over the likelihood's parameters (including ``kappa``, which has no
-counterpart in the curve itself). Every quantity comes out as a posterior
-distribution and the intervals are read straight off it.
-
-The observed scores live in [0, 1], so the likelihood is a Beta with a
-per-benchmark concentration ``kappa``:
-
-    mu[m, b]  = sigmoid(slope[b] * (capability[m] - difficulty[b]))
-    y[m, b]  ~ Beta(mu * kappa[b], (1 - mu) * kappa[b])
-
-giving variance ``mu * (1 - mu) / (kappa[b] + 1)``. A low ``kappa`` means a
-benchmark's scores scatter widely around the curve (something other than
-capability and difficulty is driving them); a high ``kappa`` means the curve
-explains them tightly. Learning one per benchmark lets the fit lean on the
-benchmarks that are actually informative about capability.
-
-Priors (all customisable through :class:`BayesianPriors`):
-
-    capability C_m  ~ Normal(0, tau_cd)
-    difficulty D_b  ~ ZeroSumNormal(tau_cd)   sum_b D_b = 0
-    slope a_b       ~ exp(ZeroSumNormal(tau_alpha))   prod_b a_b = 1
-    tau_cd          ~ LogNormal(ln 3, 0.5)
-    tau_alpha       ~ LogNormal(ln 0.5, 0.5)
-    kappa_b         ~ LogNormal(ln 20, 1)
-
-The two sum-to-zero constraints are what identify the fit: sum_b D_b = 0
-fixes the location of the capability scale, and prod_b a_b = 1 (a geometric
-mean of 1) fixes its multiplicative scale. That replaces the anchor benchmark
-and L2 penalty used by the least-squares fit; there is no anchor benchmark
-here.
-
-The item parameters are drawn either **centred** (straight from their priors,
-the default) or **non-centred** (as unit-scale offsets rescaled by their
-hyperparameter), switched by ``centred=``:
-
-    centred      C_m ~ Normal(0, tau_cd)
-    non-centred  z_m ~ Normal(0, 1),  C_m = z_m * tau_cd
-
-The two define the *same* posterior and differ only in the coordinates NUTS
-explores, so this is a sampling choice, not a modelling one. Both carry the
-same zero-sum constraints - the difficulties and log slopes are ZeroSumNormal
-either way - so the identification above does not depend on the choice.
-Centred suits data that pin each item parameter tightly; non-centred decouples
-the offsets from tau_cd / tau_alpha and so avoids Neal's funnel where the data
-do not.
-
-Which one wins depends on the data, and it interacts with ``target_accept``:
-the centred geometry needs a smaller step size to get through the narrow part
-of the funnel, so it needs a higher ``target_accept`` to work at all. Measured
-on the published data, centred at 0.95 beats non-centred at 0.9 on every
-diagnostic - including tau_cd, the global scale, which is the slowest mixer
-and the first parameter to trip the convergence warning. Retune
-``target_accept`` within a parameterisation before comparing the two; holding
-it fixed makes centred look far worse than it is.
-
-Results are reported on the ECI scale, defined by two anchor models
-(Claude 3.5 Sonnet -> 130, GPT-5 -> 150) via the affine map
-``eci = a + b * capability``, exactly as in :mod:`eci.fitting`. The map is
-applied per posterior draw, so the anchor models sit at exactly 130/150 in
-every draw; their interval cells are NaN.
+Besides the priors dataclass, two public entry points do the work:
+:func:`build_bayesian_model` assembles the plain ``pm.Model`` (coordinates,
+priors, likelihood) without touching the sampler, so it can be inspected or
+sampled by hand; :func:`fit_bayesian_eci` calls it, runs ``pm.sample``, and
+does everything downstream of the raw posterior - convergence warnings,
+rescaling each draw onto the ECI scale via the anchor models, and (with
+``evaluate=True``) handing the trace to :mod:`eci.evaluation`. Everything
+else here is a private helper behind one of those two: pulling HDI/ETI
+intervals out of an array, indexing the input data, and the per-draw anchor
+transform.
 """
 
 import warnings

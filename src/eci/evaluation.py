@@ -34,10 +34,11 @@ Typical use is through the fit itself::
     results = draws["evaluation"]
     save_evaluation(results, "outputs/evaluation")
 
-``save_evaluation`` writes the two-page PDF report. Everything it draws on -
-the per-parameter, per-benchmark and per-observation breakdowns - stays
-available as dataframes in the returned dict (see :func:`evaluate_fit`) for
-drilling into a number the PDF flags; it just isn't written to disk by
+``save_evaluation`` writes the three-page PDF report - metrics, QQ plots, and
+a forest plot of every benchmark's ``kappa`` and ``difficulty``. Everything it
+draws on - the per-parameter, per-benchmark and per-observation breakdowns -
+stays available as dataframes in the returned dict (see :func:`evaluate_fit`)
+for drilling into a number the PDF flags; it just isn't written to disk by
 default.
 """
 
@@ -540,6 +541,32 @@ def qq_data(
     }
 
 
+def benchmark_forest_data(trace: az.InferenceData, hdi_prob: float = 0.90) -> pd.DataFrame:
+    """
+    Per-benchmark posterior mean and HDI of ``kappa`` and ``difficulty``, one
+    row per benchmark, sorted by difficulty.
+
+    Both are model parameters, not per-observation quantities, so this runs
+    on the full trace regardless of ``max_draws``. In native model units
+    (difficulty is centred at 0 by its zero-sum prior; kappa is the Beta
+    concentration) rather than the EDI scale, since the transform to EDI
+    lives in :mod:`eci.bayesian` and isn't available here - this is a
+    diagnostic view of the fit's own parameters, not the published scores.
+    """
+    hdi = az.hdi(trace, var_names=["kappa", "difficulty"], hdi_prob=hdi_prob)
+    mean = trace.posterior[["kappa", "difficulty"]].mean(dim=("chain", "draw"))
+    forest = pd.DataFrame({
+        "benchmark": trace.posterior.coords["benchmark"].values,
+        "kappa_mean": mean["kappa"].values,
+        "kappa_lo": hdi["kappa"].sel(hdi="lower").values,
+        "kappa_hi": hdi["kappa"].sel(hdi="higher").values,
+        "difficulty_mean": mean["difficulty"].values,
+        "difficulty_lo": hdi["difficulty"].sel(hdi="lower").values,
+        "difficulty_hi": hdi["difficulty"].sel(hdi="higher").values,
+    })
+    return forest.sort_values("difficulty_mean").reset_index(drop=True)
+
+
 def evaluate_fit(
     trace: az.InferenceData,
     df: pd.DataFrame,
@@ -562,8 +589,8 @@ def evaluate_fit(
             fit used, or 0 to score everything raw.
 
     Returns a dict with keys sampler_summary, sampler_parameters, accuracy,
-    loo_summary, loo_observations, ppc, calibration, pit and qq (arrays for
-    plotting, not a table).
+    loo_summary, loo_observations, ppc, calibration, pit, forest and qq
+    (arrays for plotting, not a table).
     """
     sampler_summary, sampler_parameters = sampler_diagnostics(trace)
     raw = _observed(df)
@@ -586,6 +613,7 @@ def evaluate_fit(
         "ppc": ppc,
         "calibration": coverage,
         "pit": pit,
+        "forest": benchmark_forest_data(trace),
         "qq": qq_data(thinned, df, clip_eps=performance_clip_eps),
     }
     results["metrics"] = _metrics_table(results, totals, df)
@@ -785,13 +813,33 @@ def _draw_metrics_page(fig, metrics: pd.DataFrame) -> None:
             y -= 0.0225
 
 
+def _draw_forest(ax, forest: pd.DataFrame, column: str, title: str, log_scale: bool = False):
+    """One horizontal forest plot: posterior mean and HDI per benchmark."""
+    y = np.arange(len(forest))
+    mean, lo, hi = forest[f"{column}_mean"], forest[f"{column}_lo"], forest[f"{column}_hi"]
+    ax.errorbar(
+        mean, y, xerr=[mean - lo, hi - mean], fmt="o", ms=3, lw=1,
+        color="#2563A8", ecolor="#2563A8", capsize=0,
+    )
+    ax.set_yticks(y)
+    ax.set_yticklabels(forest["benchmark"], fontsize=6.5)
+    ax.set_ylim(-1, len(forest))
+    ax.invert_yaxis()
+    ax.set_title(title, fontsize=10)
+    ax.tick_params(axis="x", labelsize=8)
+    if log_scale:
+        ax.set_xscale("log")
+
+
 def plot_evaluation(results: dict, path: "str | Path") -> Path:
-    """Write the evaluation as a two-page PDF (needs matplotlib).
+    """Write the evaluation as a three-page PDF (needs matplotlib).
 
     Page 1 is the metrics table — every headline number, i.e. ``results["metrics"]``.
     Page 2 is the two QQ plots, which are here because they
     show something a table cannot: *where* on the score scale the fit departs
-    from the data.
+    from the data. Page 3 is a forest plot of every benchmark's ``kappa`` and
+    ``difficulty`` (posterior mean and 90% HDI, from ``results["forest"]``) -
+    the per-benchmark item parameters, visually, in place of a CSV.
     """
     import matplotlib
 
@@ -801,6 +849,7 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
 
     path = Path(path)
     qq = results["qq"]
+    forest = results["forest"]
 
     with PdfPages(path) as pdf:
         fig = plt.figure(figsize=(11, 8.5))
@@ -840,13 +889,26 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
         pdf.savefig(fig)
         plt.close(fig)
 
+        fig, axes = plt.subplots(1, 2, figsize=(11, max(4.8, 0.16 * len(forest) + 1.2)))
+        fig.suptitle(
+            "Per-benchmark item parameters (posterior mean, 90% HDI)",
+            fontsize=11, weight="bold", x=0.06, ha="left",
+        )
+        _draw_forest(axes[0], forest, "kappa", "kappa (concentration, log scale)", log_scale=True)
+        _draw_forest(axes[1], forest, "difficulty", "difficulty (model units)")
+        axes[1].axvline(0, color="#B45309", ls="--", lw=1)
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        pdf.savefig(fig)
+        plt.close(fig)
+
     return path
 
 
 def save_evaluation(results: dict, output_dir: "str | Path") -> list[Path]:
     """
-    Write the evaluation as ``evaluation_report.pdf``: the metrics table plus
-    the two QQ plots (see :func:`plot_evaluation`).
+    Write the evaluation as ``evaluation_report.pdf``: the metrics table, the
+    two QQ plots, and a forest plot of every benchmark's ``kappa`` and
+    ``difficulty`` (see :func:`plot_evaluation`).
 
     The tables behind it - sampler parameters, per-benchmark accuracy, LOO,
     posterior predictive checks, calibration, PIT - are not written to disk;

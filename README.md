@@ -209,11 +209,13 @@ or from the command line, which writes the same thing to
 python scripts/fit_eci.py --evaluate
 ```
 
-`save_evaluation` writes a single file, `evaluation_report.pdf`: the metrics
-table, then the two QQ plots — the plots are there because they show something
-a table cannot, namely *where* on the score scale the fit departs from the
-data. The metrics table carries a `guide` column saying which direction is
-good and what value would mean the model is right.
+`save_evaluation` writes a single file, `evaluation_report.pdf`, with three
+pages: the metrics table; the two QQ plots, which are there because they show
+something a table cannot, namely *where* on the score scale the fit departs
+from the data; and a forest plot of every benchmark's `kappa` and
+`difficulty` (posterior mean and 90% HDI), in place of a CSV. The metrics
+table carries a `guide` column saying which direction is good and what value
+would mean the model is right.
 
 The suite answers three separate questions, and `draws["evaluation"]` (what
 `save_evaluation` is given) keeps every table behind those headline numbers as
@@ -228,6 +230,7 @@ written to disk:
 | `loo_summary`, `loo_observations` | `elpd_loo`, `p_loo`, and the Pareto k of every observation |
 | `ppc` | Posterior predictive p-values (mid-p) for mean, sd, variance, IQR, min, max, skew and tail shares |
 | `calibration`, `pit` | PIT per observation, coverage against nominal, KS test of uniformity |
+| `forest` | Per benchmark: posterior mean and 90% HDI of `kappa` and `difficulty` — the PDF's page 3 |
 | `qq` | Arrays for the PIT-uniform and score QQ plots |
 
 Five things to know before reading the numbers:
