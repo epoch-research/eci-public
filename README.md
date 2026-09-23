@@ -12,11 +12,13 @@ to a table of benchmark scores, estimating:
   scores rise as capability increases
 
 Two fits are available: 
-1. A least-squares one that fits the curve directly, by minimizing its 
-distance to the observed scores, with bootstrap confidence intervals; and 
-2. A Bayesian one (the default) that treats the IRT curve as the *mean* 
+1. A Bayesian one (the default) that treats the IRT curve as the *mean* 
 of a per-observation Beta likelihood and infers a full posterior over its 
 parameters by MCMC, with intervals read straight off that posterior.
+2. A least-squares frequentist approach which is deprecated but available for 
+historical reproduction of results. This fits the curve directly, by minimizing its 
+distance to the observed scores, with bootstrap confidence intervals.
+
 
 See [Bayesian fit](#bayesian-fit-the-default) and
 [Least-squares fit](#least-squares-fit).
@@ -34,9 +36,9 @@ pip install -e .
 ```
 
 The Bayesian fit is the default, so PyMC and ArviZ are ordinary dependencies
-and install with the package. Importing them costs a few seconds, so `eci`
-defers that until you call the Bayesian fit: `import eci` and the least-squares
-fit stay fast.
+and install with the package. Importing them costs a few seconds, and
+`import eci` pays that cost up front - all of `eci`'s public API, including
+the Bayesian fit, is imported eagerly rather than deferred.
 
 ## Usage
 
