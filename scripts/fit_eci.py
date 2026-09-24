@@ -9,9 +9,7 @@ Usage:
     python scripts/fit_eci.py
     python scripts/fit_eci.py --input path/to/benchmark_data.zip
     python scripts/fit_eci.py --evaluate
-    python scripts/fit_eci.py --draws 8000 --chains 4
     python scripts/fit_eci.py --method least-squares
-    python scripts/fit_eci.py --method least-squares --bootstrap-samples 200
 """
 
 import argparse
@@ -84,8 +82,7 @@ def main():
     )
     bayesian.add_argument(
         "--target-accept", type=float, default=0.95,
-        help="NUTS target acceptance rate; raise towards 0.99 if the fit "
-             "reports divergences (default: 0.95)",
+        help="NUTS target acceptance rate; (default: 0.95)",
     )
     bayesian.add_argument(
         "--seed", type=int, default=12345, help="Sampler seed (default: 12345)",
@@ -100,9 +97,9 @@ def main():
     bayesian.add_argument(
         "--evaluate",
         action="store_true",
-        help="Also run the diagnostic suite (convergence, accuracy, LOO, "
-             "calibration, posterior predictive checks) and write it as a "
-             "PDF report to <output-dir>/evaluation/",
+        help="Run the diagnostic suite (convergence, accuracy, LOO, "
+             "calibration, posterior predictive checks) alongside the fit"
+             "and write it as a PDF report to <output-dir>/evaluation/",
     )
 
     least_squares = parser.add_argument_group("least-squares options")

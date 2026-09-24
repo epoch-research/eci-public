@@ -36,9 +36,7 @@ pip install -e .
 ```
 
 The Bayesian fit is the default, so PyMC and ArviZ are ordinary dependencies
-and install with the package. Importing them costs a few seconds, and
-`import eci` pays that cost up front - all of `eci`'s public API, including
-the Bayesian fit, is imported eagerly rather than deferred.
+and install with the package and may take some seconds to import. 
 
 ## Usage
 
@@ -117,11 +115,10 @@ pinned by definition.
 
 ### Bayesian fit (the default)
 
-`fit_bayesian_eci` infers the curve's parameters by MCMC rather than fitting
-the curve directly: the curve is the mean of a per-observation Beta
-likelihood (below), and what's sampled is the posterior over that likelihood's
-parameters. Every quantity comes out as a posterior distribution and the
-intervals are read straight off it:
+`fit_bayesian_eci` infers the curve's parameters by MCMC: the IRT curve is the 
+mean of a per-observation Beta likelihood (below), and what's sampled is 
+the posterior over that likelihood's parameters. Every quantity comes out 
+as a posterior distribution and the intervals are read straight off it:
 
 ```python
 from eci import prepare_benchmark_data, fit_bayesian_eci
@@ -141,7 +138,7 @@ posteriors are skewed and where an HDI is meaningfully tighter than equal
 tails. Pass `interval="eti"` for equal-tailed intervals (5th/95th percentiles)
 instead, or `ci_level=` for a different mass.
 
-Scores live in [0, 1], so the likelihood is a Beta with a per-benchmark
+Scores live in [0, 1], consistent with a Beta likelihood, with a per-benchmark
 concentration `kappa_b`:
 
     mu[m, b]  = sigmoid(slope[b] * (capability[m] - difficulty[b]))
@@ -150,9 +147,9 @@ concentration `kappa_b`:
 whose variance is `mu * (1 - mu) / (kappa_b + 1)`. A low `kappa_b` means the
 benchmark's scores scatter widely around the curve — something other than
 capability and difficulty is driving them; a high `kappa_b` means the curve
-explains them tightly. One `kappa` per benchmark lets the fit lean on the
-benchmarks that are actually informative about capability, and `edi_df`
-reports it alongside difficulty and slope.
+explains them tightly. One `kappa` per benchmark lets the fit learn from the
+benchmarks that are most informative about capability.  `edi_df` reports 
+`kappa` posteriors alongside difficulty and slope.
 
 The priors are weakly informative:
 
@@ -165,9 +162,9 @@ The priors are weakly informative:
 | `tau_alpha` | `LogNormal(ln 0.5, 0.5)` | |
 | `kappa_b` | `LogNormal(ln 20, 1)` | per-benchmark Beta concentration |
 
-Those two sum-to-zero constraints are what identify the fit, so it uses no
-anchor benchmark and no L2 penalty. The three hyperpriors are customisable,
-each given as the `(mu, sigma)` of the underlying normal:
+Those two sum-to-zero constraints are what identify the fit. 
+The three hyperpriors are customisable, each given as the 
+`(mu, sigma)` of the underlying normal:
 
 ```python
 from eci import BayesianPriors, fit_bayesian_eci
@@ -207,19 +204,16 @@ python scripts/fit_eci.py --evaluate
 ```
 
 `save_evaluation` writes a single file, `evaluation_report.pdf`, with three
-pages: the metrics table; the two QQ plots, which are there because they show
-something a table cannot, namely *where* on the score scale the fit departs
-from the data; and a forest plot of every benchmark's `kappa` and
-`difficulty` (posterior mean and 90% HDI), in place of a CSV. The metrics
-table carries a `guide` column saying which direction is good and what value
-would mean the model is right.
+pages: the metrics table; the two QQ plots, which show *where* on the score 
+scale the fit departs from the data; and a forest plot of every benchmark's 
+`kappa` and `difficulty` (posterior mean and 90% HDI). 
 
-The suite answers three separate questions, and `draws["evaluation"]` (what
-`save_evaluation` is given) keeps every table behind those headline numbers as
-a dataframe, for drilling into one that the PDF flags — none of these are
-written to disk:
+The suite looks at sampling, accuracy and calibration metrics. 
+`draws["evaluation"]` (passed to `save_evaluation`) stores every data table 
+used for the summary statistics as a dataframe, but is not by default saved
+to disk:
 
-| Table | What it tells you |
+| Table | Metrics |
 | --- | --- |
 | **`metrics`** | **Every headline number, flat — read this one first** |
 | `sampler_summary`, `sampler_parameters` | Divergences, r-hat, ESS (bulk and tail), MCSE, BFMI |
@@ -230,34 +224,7 @@ written to disk:
 | `forest` | Per benchmark: posterior mean and 90% HDI of `kappa` and `difficulty` — the PDF's page 3 |
 | `qq` | Arrays for the PIT-uniform and score QQ plots |
 
-The PDF is the metrics table, then the two QQ plots — the plots are there
-because they show something a table cannot, namely *where* on the score scale
-the fit departs from the data. Every number in it comes from `metrics.csv`,
-which also carries a `guide` column saying which direction is good and what
-value would mean the model is right.
-
-Five things to know before reading the numbers:
-
-- **Per-benchmark RMSE is not reported, and should not be.** It is a
-  restatement of `kappa`, which the fit already gives you: on the published
-  data a benchmark's RMSE regresses on the predictive SD the model itself
-  claims with R² = 0.93, and ranks against `kappa` at spearman −0.92. A
-  high-RMSE benchmark is not one the fit handles badly, it is one the fit
-  already knows is noisy. `rmse_ratio` — observed RMSE over the SD the model
-  claims — asks the question that isn't already answered: near 1 the
-  benchmark scatters as much as the model says, below 1 the model reserves
-  more spread than it needs. It ranks benchmarks differently; only 2 of the
-  top 5 coincide with raw RMSE.
-
-- **`performance_clip_eps` is a modelling choice, not a tolerance.** The Beta
-  has no density at exactly 0 or 1, so boundary scores are clipped to
-  `[eps, 1-eps]` — default `1e-4`. Most boundary rows fit a shape parameter
-  `mu*kappa < 1`, where the density *diverges* as the value goes to 0, so a
-  smaller eps hands the likelihood an unbounded reward for pushing those rows
-  down; the model pays by lowering the capability of the models involved and
-  the `kappa` of the benchmarks carrying the zeros. Going to `1e-6` buys 0.03
-  of squared error at the 82 exact zeros and adds 0.24 across the 2457-row
-  bulk. ELPD is not comparable across different eps.
+Notes on metrics:
 - **Accuracy is scored against the raw scores, the distributional checks
   against the clipped ones.** The Beta likelihood is never shown a score of
   exactly 0 or 1, so it cannot be asked to have predicted one; scoring the PIT
@@ -270,7 +237,7 @@ Five things to know before reading the numbers:
   published data that alone accounted for 78 of 115 apparently failing
   per-benchmark checks, since a benchmark with no scores above 0.95 has
   `T_obs = 0` and `P(T_rep >= 0) = 1` however the model behaves.
-- **Read the spread checks (sd, variance, IQR) per benchmark, not pooled.**
+- **Consider per-benchmark spread checks (sd, variance, IQR) alongside pooled.**
   Pooled across benchmarks they measure the spread of the fitted curve, which
   partial pooling deliberately shrinks, so the pooled p-value runs low even
   for a model that is right. On that same synthetic fit the ten per-benchmark
@@ -286,34 +253,27 @@ every draw.
 it differently or inspect it. Divergences and poor mixing are reported as
 warnings, not errors, so the draws are still returned for inspection.
 
-On the published data the defaults take about two minutes and mix cleanly: 0
-divergences in 16,000 draws, 0 of 444 parameters above r-hat 1.01, minimum ESS
-586 bulk / 924 tail, minimum BFMI 0.85.
 
 ### Least-squares fit (deprecated)
 
 Deprecated/historical: this predates the Bayesian fit above, which is now
-the default and the one to use for new work. It's kept for reference and
-for reproducing old results.
+the default. It's kept for reference and for reproducing old results.
 
-`fit_eci_model` fits the same curve by least squares. It is identified
+`fit_eci_model` fits the same IRT curve by least squares. It is identified
 differently: the anchor benchmark's discriminability is pinned to fix the
 multiplicative scale and an L2 penalty resolves the remaining translation
 freedom, where the Bayesian fit uses its two sum-to-zero constraints. Its
 intervals come from a bootstrap rather than a posterior. It is the faster 
 of the two and needs no MCMC diagnostics, but it reports no `kappa`, has 
-no per-observation noise model, and there is no diagnostic suite for it 
-— `--evaluate` is Bayesian-only. `edi_df` carries an `is_anchor` column 
-marking the pinned benchmark.
+no per-observation noise model, and there is no diagnostic suite for it. 
+`edi_df` carries an `is_anchor` column marking the pinned benchmark.
 
 Bootstrap resampling holds the set of models fixed and resamples each
-model's benchmark results with replacement. Any fit — central or bootstrap —
-that fails to converge, or whose anchor capabilities coincide or invert
-(defining no scale), raises.
+model's benchmark results with replacement. 
 
 The anchor model names are matched against the `Model` column of the input
 data; renaming those models upstream requires passing the new names
-explicitly (the fit fails loudly if an anchor is missing).
+explicitly (the fit fails if an anchor is missing).
 
 ## Running Tests
 

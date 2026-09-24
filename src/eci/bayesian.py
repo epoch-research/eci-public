@@ -6,7 +6,7 @@ likelihood sampled by MCMC. See the README's "Bayesian fit" section
 for the model, the priors, the centred/non-centred sampling choice, 
 and how results are mapped onto the ECI scale.
 
-Besides the priors dataclass, two public entry points do the work:
+Besides the priors dataclass, two public entry points build and fit the model:
 :func:`build_bayesian_model` assembles the plain ``pm.Model`` (coordinates,
 priors, likelihood) without touching the sampler, so it can be inspected or
 sampled by hand; :func:`fit_bayesian_eci` calls it, runs ``pm.sample``, and
@@ -168,17 +168,11 @@ def build_bayesian_model(
             as the value goes to 0 - so shrinking eps hands the likelihood an
             unbounded reward for pushing those rows' mu down, and the model
             pays for it by lowering the capability of the models involved and
-            the kappa of the benchmarks carrying the zeros. Going from 1e-4 to
-            1e-6 on the published data buys 0.03 of squared error at the 82
-            exact zeros and adds 0.24 across the 2457-row bulk.
-
-            The default is one item's worth of resolution for a benchmark of a
-            few thousand items: an observed 0 says the true rate is below
-            about 1/N, not that it equals eps.
+            the kappa of the benchmarks carrying the zeros. 
         centred: sample the item parameters directly (the default), or, when
             False, as unit-scale offsets rescaled by their hyperparameter.
             The two define the *same* posterior and differ only in the
-            coordinates NUTS explores.
+            coordinates NUTS explores to resolve divergence if needed.
 
     Returns:
         A ``pm.Model`` whose coordinates are the model and benchmark *names*
@@ -308,10 +302,8 @@ def fit_bayesian_eci(
         draws: posterior draws kept per chain.
         tune: tuning (warm-up) steps per chain, discarded.
         chains: number of chains, run in parallel where cores allow.
-        target_accept: NUTS target acceptance rate; raise it towards 0.99 if
-            the fit reports divergences. The centred parameterisation needs a
-            higher value than the non-centred one to keep its step size small
-            enough for the narrow part of the funnel.
+        target_accept: NUTS target acceptance rate. The centred parameterisation 
+            may need a higher value.
         random_seed: seed for the sampler.
         anchor_model_low / anchor_eci_low / anchor_model_high /
             anchor_eci_high: the models that define the ECI scale and their
@@ -352,10 +344,6 @@ def fit_bayesian_eci(
     Divergences and poor mixing are warned about, not raised; a fit whose
     anchor capabilities coincide or invert in any draw raises, since no scale
     is then defined.
-
-    The global scale ``tau_cd`` is the slowest-mixing parameter and the one
-    that trips the convergence warning first; it is a nuisance parameter, and
-    the quantities the fit reports converge well before it does.
     """
     model_ids, model_names, bench_ids, bench_names, _, _ = _index_data(df)
     try:
