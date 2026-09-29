@@ -133,23 +133,28 @@ print(draws["trace"])  # the full arviz.InferenceData
 
 `eci` and `edi` are posterior means; the `_ci_low` / `_ci_high` columns are
 90% **highest-density intervals** — the narrowest window holding 90% of the
-posterior. The same applies to `discriminability_scaled` and `kappa`, whose
+posterior. The same applies to `discriminability_scaled`, `sigma` and `kappa`, whose
 posteriors are skewed and where an HDI is meaningfully tighter than equal
 tails. Pass `interval="eti"` for equal-tailed intervals (5th/95th percentiles)
 instead, or `ci_level=` for a different mass.
 
 Scores live in [0, 1], consistent with a Beta likelihood, with a per-benchmark
-concentration `kappa_b`:
+noise SD `sigma_b`:
 
     mu[m, b]  = sigmoid(slope[b] * (capability[m] - difficulty[b]))
+    kappa[b]  = 1 / (4 * sigma[b]^2) - 1
     y[m, b]  ~ Beta(mu * kappa[b], (1 - mu) * kappa[b])
 
-whose variance is `mu * (1 - mu) / (kappa_b + 1)`. A low `kappa_b` means the
-benchmark's scores scatter widely around the curve — something other than
-capability and difficulty is driving them; a high `kappa_b` means the curve
-explains them tightly. One `kappa` per benchmark lets the fit learn from the
-benchmarks that are most informative about capability.  `edi_df` reports 
-`kappa` posteriors alongside difficulty and slope.
+The Beta's variance is `mu * (1 - mu) / (kappa_b + 1)`, so its SD is
+`2 * sqrt(mu * (1 - mu)) * sigma_b`: `sigma_b` is the SD of the scores where the
+curve passes 50%, and the largest it gets anywhere on that benchmark, shrinking
+towards 0 and 1. It has to stay below 0.5, where `kappa_b` reaches 0. A high
+`sigma_b` means the benchmark's scores scatter widely around the curve —
+something other than capability and difficulty is driving them; a low
+`sigma_b` means the curve explains them tightly. One `sigma` per benchmark lets
+the fit learn from the benchmarks that are most informative about capability.
+`edi_df` reports `sigma` posteriors, and the concentration `kappa` they imply,
+alongside difficulty and slope.
 
 The priors are weakly informative:
 
@@ -160,16 +165,21 @@ The priors are weakly informative:
 | `alpha_b` (slope) | `exp(ZeroSumNormal(tau_alpha))` | `prod_b alpha_b = 1` fixes the scale |
 | `tau_cd` | `LogNormal(ln 3, 0.5)` | shared scale of capability and difficulty |
 | `tau_alpha` | `LogNormal(ln 0.5, 0.5)` | |
-| `kappa_b` | `LogNormal(ln 20, 1)` | per-benchmark Beta concentration |
+| `sigma_b` | `LogNormal(ln sigma_median, tau_sigma)` truncated to `(0, 0.5)` | per-benchmark noise SD at `mu = 0.5` |
+| `sigma_median` | `LogNormal(ln 0.1, 0.5)` | the typical benchmark's noise SD |
+| `tau_sigma` | `LogNormal(ln 0.5, 0.5)` | spread of `ln sigma_b` across benchmarks |
 
-Those two sum-to-zero constraints are what identify the fit. 
-The three hyperpriors are customisable, each given as the 
+Those two sum-to-zero constraints are what identify the fit. The noise prior
+is hierarchical: the benchmarks share a typical noise level, learned from all
+of them, so one with only a handful of scores is pulled towards it rather than
+towards a fixed guess.
+The four hyperpriors are customisable, each given as the
 `(mu, sigma)` of the underlying normal:
 
 ```python
 from eci import BayesianPriors, fit_bayesian_eci
 
-priors = BayesianPriors(kappa=(np.log(50.0), 1.0))
+priors = BayesianPriors(sigma_median=(np.log(0.07), 0.5))
 eci_df, edi_df, draws = fit_bayesian_eci(df, priors=priors)
 ```
 
@@ -180,7 +190,8 @@ hyperparameter. `centred=False` (or `--non-centred`) switches to the other
 form. This may be useful for different priors but with the default priors, 
 parameters should stay centered. Note that the two parametrisations define the 
 *same* posterior and differ only in the coordinates NUTS explores, so this 
-is a sampling choice, not a modelling one.
+is a sampling choice, not a modelling one. `sigma_b` is centred either way,
+since its truncation cannot be carried by a unit-scale offset.
 
 
 ### Evaluating a fit

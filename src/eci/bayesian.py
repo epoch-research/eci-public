@@ -39,8 +39,15 @@ from .fitting import (
 # the clipping applied to the observed scores.
 _MU_EPS = 1e-6
 
+# The Beta's SD at mu = 0.5 is 1 / (2 sqrt(kappa + 1)), which reaches 0.5 only
+# as kappa -> 0, so the per-benchmark SD must stay below it.
+_MAX_SIGMA = 0.5
+
 # Variables checked for convergence after sampling.
-_DIAGNOSTIC_VARS = ["capability", "difficulty", "slope", "kappa", "tau_cd", "tau_alpha"]
+_DIAGNOSTIC_VARS = [
+    "capability", "difficulty", "slope", "sigma",
+    "tau_cd", "tau_alpha", "sigma_median", "tau_sigma",
+]
 
 # How the reported intervals are cut out of the posterior.
 INTERVAL_KINDS = ("hdi", "eti")
@@ -49,32 +56,42 @@ INTERVAL_KINDS = ("hdi", "eti")
 @dataclass(frozen=True)
 class BayesianPriors:
     """
-    The model's three hyperpriors, each a LogNormal given as
+    The model's four hyperpriors, each a LogNormal given as
     ``(mu, sigma)`` of the underlying normal.
 
     Defaults are the weakly informative ones described in the methodology.
-    Override any of them, e.g. a tighter concentration prior::
+    Override any of them, e.g. a prior expecting less noisy benchmarks::
 
-        BayesianPriors(kappa=(np.log(50.0), 1.0))
+        BayesianPriors(sigma_median=(np.log(0.07), 0.5))
+
+    The per-benchmark noise SD ``sigma`` is the Beta's standard deviation
+    where the curve passes mu = 0.5 (and its largest anywhere; elsewhere it
+    shrinks by 2 sqrt(mu (1 - mu))). Its prior is hierarchical,
+    ``LogNormal(ln sigma_median, tau_sigma)`` truncated to (0, 0.5) since the
+    Beta cannot be wider, so benchmarks with few scores are pulled towards
+    the noise level the others share rather than towards a fixed guess.
 
     Attributes:
         tau_cd: shared scale of capabilities and difficulties.
         tau_alpha: scale of the log slopes.
-        kappa: per-benchmark Beta concentration. The default spreads mass
-            over roughly 3-150, so benchmarks are free to be much noisier
-            than the typical one.
+        sigma_median: the typical benchmark's noise SD. The default centres
+            it on 0.1 with 90% of the mass on roughly 0.04-0.23.
+        tau_sigma: spread of log sigma across benchmarks. The default,
+            around 0.5, lets one benchmark be several times noisier than
+            another.
     """
 
     tau_cd: tuple[float, float] = field(default=(float(np.log(3.0)), 0.5))
     tau_alpha: tuple[float, float] = field(default=(float(np.log(0.5)), 0.5))
-    kappa: tuple[float, float] = field(default=(float(np.log(20.0)), 1.0))
+    sigma_median: tuple[float, float] = field(default=(float(np.log(0.1)), 0.5))
+    tau_sigma: tuple[float, float] = field(default=(float(np.log(0.5)), 0.5))
 
 
 def _hdi(values: np.ndarray, prob: float) -> tuple[np.ndarray, np.ndarray]:
     """Highest-density interval of each column of ``values`` (draws x items).
 
     The narrowest window containing ``prob`` of the draws, found by sliding it
-    over the sorted draws. For a skewed posterior - a slope or a kappa - this
+    over the sorted draws. For a skewed posterior - a slope or a sigma - this
     is a tighter and more honest interval than cutting equal tails, and it
     never places the point estimate outside its own interval.
     """
@@ -168,7 +185,7 @@ def build_bayesian_model(
             as the value goes to 0 - so shrinking eps hands the likelihood an
             unbounded reward for pushing those rows' mu down, and the model
             pays for it by lowering the capability of the models involved and
-            the kappa of the benchmarks carrying the zeros. 
+            raising the sigma of the benchmarks carrying the zeros.
         centred: sample the item parameters directly (the default), or, when
             False, as unit-scale offsets rescaled by their hyperparameter.
             The two define the *same* posterior and differ only in the
@@ -185,7 +202,21 @@ def build_bayesian_model(
     with pm.Model(coords=coords) as model:
         tau_cd = _lognormal("tau_cd", priors.tau_cd)
         tau_alpha = _lognormal("tau_alpha", priors.tau_alpha)
-        kappa = _lognormal("kappa", priors.kappa, dims="benchmark")
+        sigma_median = _lognormal("sigma_median", priors.sigma_median)
+        tau_sigma = _lognormal("tau_sigma", priors.tau_sigma)
+        # The prior is on the noise SD; the Beta takes the concentration it
+        # implies, inverting sigma = 1 / (2 sqrt(kappa + 1)). sigma stays
+        # centred even when centred=False: a non-centred offset cannot carry
+        # the truncation, whose normalising constant here depends on the
+        # hyperparameters.
+        sigma = pm.Truncated(
+            "sigma",
+            pm.LogNormal.dist(mu=pm.math.log(sigma_median), sigma=tau_sigma),
+            lower=0.0,
+            upper=_MAX_SIGMA,
+            dims="benchmark",
+        )
+        kappa = pm.Deterministic("kappa", 1.0 / (4.0 * sigma**2) - 1.0, dims="benchmark")
 
         if centred:
             capability = pm.Normal("capability", 0.0, tau_cd, dims="model")
@@ -330,13 +361,14 @@ def fit_bayesian_eci(
           eci_ci_low / eci_ci_high (NaN for the anchor models, whose values
           are fixed by definition rather than estimated). Sorted by eci
           descending.
-        - edi_df: benchmark_id, benchmark, edi, discriminability_scaled and
-          kappa, each with _ci_low / _ci_high columns. Together edi and
+        - edi_df: benchmark_id, benchmark, edi, discriminability_scaled,
+          sigma and kappa, each with _ci_low / _ci_high columns. Together edi and
           discriminability_scaled trace the fitted curve: a model's predicted
           score is ``sigmoid(discriminability_scaled * (eci - edi))``.
           Sorted by edi.
         - draws: dict with model_ids, model_names, benchmark_ids,
-          benchmark_names, the (n_draws, n) arrays eci, edi, slope and kappa,
+          benchmark_names, the (n_draws, n) arrays eci, edi, slope, sigma
+          and kappa,
           the per-draw map coefficients a and b, trace, the full
           ``arviz.InferenceData``, and - with evaluate=True - evaluation,
           the dict of diagnostic tables.
@@ -383,6 +415,7 @@ def fit_bayesian_eci(
     capability = _stack_draws(trace, "capability", "model")
     difficulty = _stack_draws(trace, "difficulty", "benchmark")
     slope = _stack_draws(trace, "slope", "benchmark")
+    sigma = _stack_draws(trace, "sigma", "benchmark")
     kappa = _stack_draws(trace, "kappa", "benchmark")
 
     # Re-anchor every draw with its own transform, so the anchors sit at
@@ -403,6 +436,7 @@ def fit_bayesian_eci(
         "eci": eci,
         "edi": edi,
         "slope": slope_scaled,
+        "sigma": sigma,
         "kappa": kappa,
         "a": a,
         "b": b,
@@ -432,6 +466,7 @@ def fit_bayesian_eci(
             "benchmark": bench_names,
             **summarise(edi, "edi"),
             **summarise(slope_scaled, "discriminability_scaled"),
+            **summarise(sigma, "sigma"),
             **summarise(kappa, "kappa"),
         }
     )

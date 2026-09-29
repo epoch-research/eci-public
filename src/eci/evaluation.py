@@ -35,7 +35,10 @@ from scipy import stats
 # (capability_z and friends) are excluded: they are sampling coordinates, not
 # results, and their r_hat says nothing extra once the quantity they build is
 # converged.
-REPORTED_VARS = ("capability", "difficulty", "slope", "kappa", "tau_cd", "tau_alpha")
+REPORTED_VARS = (
+    "capability", "difficulty", "slope", "sigma",
+    "tau_cd", "tau_alpha", "sigma_median", "tau_sigma",
+)
 
 # Coverage levels reported by the calibration check.
 DEFAULT_COVERAGE_LEVELS = (0.50, 0.80, 0.90, 0.95)
