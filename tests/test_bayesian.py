@@ -65,7 +65,7 @@ def truth():
         "bench_names": [f"Bench {b}" for b in range(N_BENCHMARKS)],
         "eci": pd.Series(a_shift + b_scale * capability, index=names),
         "edi": pd.Series(a_shift + b_scale * difficulty, index=[f"Bench {b}" for b in range(N_BENCHMARKS)]),
-        "kappa": pd.Series(kappa, index=[f"Bench {b}" for b in range(N_BENCHMARKS)]),
+        "sigma": pd.Series(0.5 / np.sqrt(kappa + 1.0), index=[f"Bench {b}" for b in range(N_BENCHMARKS)]),
     }
 
 
@@ -171,7 +171,7 @@ class TestOutputFormat:
 
     def test_edi_columns_and_sorting(self, fitted):
         _, edi_df, _ = fitted
-        for name in ("edi", "discriminability_scaled", "sigma", "kappa"):
+        for name in ("edi", "discriminability_scaled", "sigma"):
             assert {name, f"{name}_ci_low", f"{name}_ci_high"} <= set(edi_df.columns)
         assert edi_df["edi"].is_monotonic_increasing
         assert len(edi_df) == N_BENCHMARKS
@@ -197,10 +197,9 @@ class TestOutputFormat:
         assert (edi_df["edi_ci_low"] <= edi_df["edi"]).all()
         assert (edi_df["edi"] <= edi_df["edi_ci_high"]).all()
 
-    def test_slopes_and_concentrations_are_positive(self, fitted):
+    def test_slopes_and_noise_are_in_range(self, fitted):
         _, edi_df, _ = fitted
         assert (edi_df["discriminability_scaled"] > 0).all()
-        assert (edi_df["kappa"] > 0).all()
         assert ((edi_df["sigma"] > 0) & (edi_df["sigma"] < 0.5)).all()
 
     def test_draws_shapes(self, fitted):
@@ -209,7 +208,7 @@ class TestOutputFormat:
         assert draws["eci"].shape == (n_draws, N_MODELS)
         assert draws["edi"].shape == (n_draws, N_BENCHMARKS)
         assert draws["slope"].shape == (n_draws, N_BENCHMARKS)
-        assert draws["sigma"].shape == draws["kappa"].shape == (n_draws, N_BENCHMARKS)
+        assert draws["sigma"].shape == (n_draws, N_BENCHMARKS)
         assert draws["a"].shape == draws["b"].shape == (n_draws,)
         assert draws["model_names"][0] == "Model 0"
 
@@ -234,11 +233,11 @@ class TestParameterRecovery:
         assert spearmanr(fit, true)[0] > 0.9
 
     def test_recovers_benchmark_noise(self, fitted, truth):
-        """kappa should at least order the benchmarks by how tightly their
+        """sigma should at least order the benchmarks by how tightly their
         scores track the curve."""
         _, edi_df, _ = fitted
-        fit = edi_df.set_index("benchmark")["kappa"]
-        assert spearmanr(fit, truth["kappa"][fit.index])[0] > 0.6
+        fit = edi_df.set_index("benchmark")["sigma"]
+        assert spearmanr(fit, truth["sigma"][fit.index])[0] > 0.6
 
     def test_interval_coverage(self, fitted, truth):
         """The 90% intervals should cover most of the truth.

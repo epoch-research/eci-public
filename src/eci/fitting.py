@@ -4,7 +4,7 @@ Fitting for the Epoch Capabilities Index (ECI).
 Deprecated/historical: this least-squares fit predates the Bayesian one in
 ``eci.bayesian``, which is now the default and the one to use. It is kept
 for reference and for reproducing old results, not for new work - it has no
-per-observation noise model, no `kappa`, and no diagnostic suite.
+per-observation noise model, no `sigma`, and no diagnostic suite.
 
 The model assumes benchmark performance follows a logistic curve:
 

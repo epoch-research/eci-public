@@ -34,7 +34,7 @@ OUTPUT_DIR = Path(__file__).parent.parent / "outputs"
 MODEL_METADATA_COLS = ["date", "Organization", "model_version", "source"]
 
 # Per-benchmark columns written out, in order, when the fit produces them
-EDI_VALUE_COLS = ["edi", "discriminability_scaled", "sigma", "kappa"]
+EDI_VALUE_COLS = ["edi", "discriminability_scaled", "sigma"]
 
 
 def join_model_metadata(eci_df: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
@@ -174,8 +174,8 @@ def main():
     if "benchmark_release_date" in edi_df.columns:
         edi_cols.append("benchmark_release_date")
     # is_anchor is least-squares only (the Bayesian fit pins no benchmark);
-    # sigma and kappa are Bayesian only
-    edi_cols += [c for c in ("is_anchor", "sigma", "kappa") if c in edi_df.columns]
+    # sigma is Bayesian only
+    edi_cols += [c for c in ("is_anchor", "sigma") if c in edi_df.columns]
     edi_cols += [
         f"{name}_{bound}"
         for name in EDI_VALUE_COLS

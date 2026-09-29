@@ -115,7 +115,7 @@ class TestAccuracy:
         assert "OVERALL" not in set(accuracy["benchmark"])
 
     def test_reports_the_ratio_not_raw_rmse(self, evaluated):
-        """Raw per-benchmark RMSE is a restatement of kappa, so it is not
+        """Raw per-benchmark RMSE is a restatement of sigma, so it is not
         reported; the ratio against the model's own predicted SD is."""
         results, _ = evaluated
         accuracy = results["accuracy"]
@@ -219,11 +219,11 @@ class TestForest:
     def test_intervals_bracket_the_mean(self, evaluated):
         results, _ = evaluated
         forest = results["forest"]
-        assert (forest["kappa_lo"] <= forest["kappa_mean"]).all()
-        assert (forest["kappa_mean"] <= forest["kappa_hi"]).all()
+        assert (forest["sigma_lo"] <= forest["sigma_mean"]).all()
+        assert (forest["sigma_mean"] <= forest["sigma_hi"]).all()
         assert (forest["difficulty_lo"] <= forest["difficulty_mean"]).all()
         assert (forest["difficulty_mean"] <= forest["difficulty_hi"]).all()
-        assert (forest["kappa_lo"] > 0).all()  # kappa is a concentration
+        assert ((forest["sigma_lo"] > 0) & (forest["sigma_hi"] < 0.5)).all()  # sigma's support
 
 
 class TestSaving:

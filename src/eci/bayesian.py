@@ -361,14 +361,14 @@ def fit_bayesian_eci(
           eci_ci_low / eci_ci_high (NaN for the anchor models, whose values
           are fixed by definition rather than estimated). Sorted by eci
           descending.
-        - edi_df: benchmark_id, benchmark, edi, discriminability_scaled,
-          sigma and kappa, each with _ci_low / _ci_high columns. Together edi and
+        - edi_df: benchmark_id, benchmark, edi, discriminability_scaled
+          and sigma, each with _ci_low / _ci_high columns. Together edi and
           discriminability_scaled trace the fitted curve: a model's predicted
           score is ``sigmoid(discriminability_scaled * (eci - edi))``.
           Sorted by edi.
         - draws: dict with model_ids, model_names, benchmark_ids,
-          benchmark_names, the (n_draws, n) arrays eci, edi, slope, sigma
-          and kappa,
+          benchmark_names, the (n_draws, n) arrays eci, edi, slope and
+          sigma,
           the per-draw map coefficients a and b, trace, the full
           ``arviz.InferenceData``, and - with evaluate=True - evaluation,
           the dict of diagnostic tables.
@@ -416,7 +416,6 @@ def fit_bayesian_eci(
     difficulty = _stack_draws(trace, "difficulty", "benchmark")
     slope = _stack_draws(trace, "slope", "benchmark")
     sigma = _stack_draws(trace, "sigma", "benchmark")
-    kappa = _stack_draws(trace, "kappa", "benchmark")
 
     # Re-anchor every draw with its own transform, so the anchors sit at
     # exactly 130/150 throughout the posterior and the intervals describe
@@ -437,7 +436,6 @@ def fit_bayesian_eci(
         "edi": edi,
         "slope": slope_scaled,
         "sigma": sigma,
-        "kappa": kappa,
         "a": a,
         "b": b,
         "trace": trace,
@@ -467,7 +465,6 @@ def fit_bayesian_eci(
             **summarise(edi, "edi"),
             **summarise(slope_scaled, "discriminability_scaled"),
             **summarise(sigma, "sigma"),
-            **summarise(kappa, "kappa"),
         }
     )
 

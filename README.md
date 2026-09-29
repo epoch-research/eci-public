@@ -133,7 +133,7 @@ print(draws["trace"])  # the full arviz.InferenceData
 
 `eci` and `edi` are posterior means; the `_ci_low` / `_ci_high` columns are
 90% **highest-density intervals** — the narrowest window holding 90% of the
-posterior. The same applies to `discriminability_scaled`, `sigma` and `kappa`, whose
+posterior. The same applies to `discriminability_scaled` and `sigma`, whose
 posteriors are skewed and where an HDI is meaningfully tighter than equal
 tails. Pass `interval="eti"` for equal-tailed intervals (5th/95th percentiles)
 instead, or `ci_level=` for a different mass.
@@ -153,8 +153,7 @@ towards 0 and 1. It has to stay below 0.5, where `kappa_b` reaches 0. A high
 something other than capability and difficulty is driving them; a low
 `sigma_b` means the curve explains them tightly. One `sigma` per benchmark lets
 the fit learn from the benchmarks that are most informative about capability.
-`edi_df` reports `sigma` posteriors, and the concentration `kappa` they imply,
-alongside difficulty and slope.
+`edi_df` reports `sigma` posteriors alongside difficulty and slope.
 
 The priors are weakly informative:
 
@@ -217,7 +216,7 @@ python scripts/fit_eci.py --evaluate
 `save_evaluation` writes a single file, `evaluation_report.pdf`, with three
 pages: the metrics table; the two QQ plots, which show *where* on the score 
 scale the fit departs from the data; and a forest plot of every benchmark's 
-`kappa` and `difficulty` (posterior mean and 90% HDI). 
+`sigma` and `difficulty` (posterior mean and 90% HDI). 
 
 The suite looks at sampling, accuracy and calibration metrics. 
 `draws["evaluation"]` (passed to `save_evaluation`) stores every data table 
@@ -232,7 +231,7 @@ to disk:
 | `loo_summary`, `loo_observations` | `elpd_loo`, `p_loo`, and the Pareto k of every observation |
 | `ppc` | Posterior predictive p-values (mid-p) for mean, sd, variance, IQR, min, max, skew and tail shares |
 | `calibration`, `pit` | PIT per observation, coverage against nominal, KS test of uniformity |
-| `forest` | Per benchmark: posterior mean and 90% HDI of `kappa` and `difficulty` — the PDF's page 3 |
+| `forest` | Per benchmark: posterior mean and 90% HDI of `sigma` and `difficulty` — the PDF's page 3 |
 | `qq` | Arrays for the PIT-uniform and score QQ plots |
 
 Notes on metrics:
@@ -275,7 +274,7 @@ differently: the anchor benchmark's discriminability is pinned to fix the
 multiplicative scale and an L2 penalty resolves the remaining translation
 freedom, where the Bayesian fit uses its two sum-to-zero constraints. Its
 intervals come from a bootstrap rather than a posterior. It is the faster 
-of the two and needs no MCMC diagnostics, but it reports no `kappa`, has 
+of the two and needs no MCMC diagnostics, but it reports no `sigma`, has 
 no per-observation noise model, and there is no diagnostic suite for it. 
 `edi_df` carries an `is_anchor` column marking the pinned benchmark.
 

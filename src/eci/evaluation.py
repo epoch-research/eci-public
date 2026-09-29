@@ -28,6 +28,7 @@ matplotlib.use("Agg")  # must precede importing pyplot
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib import ticker
 from matplotlib.backends.backend_pdf import PdfPages
 from scipy import stats
 
@@ -108,20 +109,20 @@ METRIC_GUIDANCE = {
     "coverage_0.95": "ideal 0.95",
     # posterior predictive
     # Pooled checks are sensitive but unspecific: they mix the spread of the
-    # fitted curve (32% of total variance) with the scatter kappa governs
+    # fitted curve (32% of total variance) with the scatter sigma governs
     # (68%), and over 2,780 rows they flag biases far too small for any one
     # benchmark to see. Read them as "something small is off", not as a verdict.
     "ppp_mean": "ideal 0.5; pooled",
-    "ppp_sd": "pooled; kappa is judged per benchmark",
-    "ppp_variance": "pooled; kappa is judged per benchmark",
-    "ppp_iqr": "pooled; kappa is judged per benchmark",
+    "ppp_sd": "pooled; sigma is judged per benchmark",
+    "ppp_variance": "pooled; sigma is judged per benchmark",
+    "ppp_iqr": "pooled; sigma is judged per benchmark",
     "ppp_min": "meaningless; the clip pins it",
     "ppp_max": "meaningless; the clip pins it",
     "ppp_skew": "ideal 0.5; the Beta cannot flex its skew",
     "ppp_frac_below_0.05": "ideal 0.5; pooled, so very sensitive",
     "ppp_frac_above_0.95": "ideal 0.5; pooled, so very sensitive",
-    "ppp_variance_median": "ideal 0.5; this judges kappa",
-    "ppp_iqr_median": "ideal 0.5; this judges kappa",
+    "ppp_variance_median": "ideal 0.5; this judges sigma",
+    "ppp_iqr_median": "ideal 0.5; this judges sigma",
     "ppp_variance_n_outside": "lower is better",
     "ppp_iqr_n_outside": "lower is better",
     "n_checks_outside": "10% expected by chance",
@@ -256,10 +257,11 @@ def predictive_accuracy(
     fit.
 
     ``per_benchmark`` deliberately does **not** carry raw RMSE. Per benchmark
-    that number is not a measure of fit: it is a restatement of ``kappa``,
+    that number is not a measure of fit: it is a restatement of ``sigma``,
     which the fit already reports. Measured on the published data, a
     benchmark's RMSE regresses on the predictive SD the model itself claims
-    with R^2 = 0.93, and ranks against ``kappa`` at spearman -0.92 - so
+    with R^2 = 0.93, and ranks against the fitted noise level at spearman
+    0.92 (measured on ``kappa``, the concentration ``sigma`` sets) - so
     ranking benchmarks by RMSE just re-ranks them by the noise parameter the
     model already estimated. A high-RMSE benchmark is not one the fit handles
     badly; it is one the fit already knows is noisy.
@@ -383,7 +385,7 @@ def posterior_predictive_checks(
     posterior and compare: ppp = P(T(y_rep) >= T(y_obs)). A value near 0.5
     means the model reproduces that feature of the data; near 0 or 1 means it
     systematically under- or over-produces it. Spread statistics (sd,
-    variance, iqr) are the ones the per-benchmark ``kappa`` is there to get
+    variance, iqr) are the ones the per-benchmark ``sigma`` is there to get
     right; the tail statistics say whether the Beta reaches the extreme
     scores the benchmarks actually show.
 
@@ -404,7 +406,7 @@ def posterior_predictive_checks(
     pooled p-value runs low even for a model that is right: on a correctly
     specified synthetic fit the ten per-benchmark variance p-values ranged
     0.11-0.65 while the pooled one was 0.0005. The per-benchmark rows ask the
-    question ``kappa`` is actually there to answer.
+    question ``sigma`` is actually there to answer.
 
     ``min`` and ``max`` are degenerate wherever the data contain scores of
     exactly 0 or 1: the Beta has no mass there, so no replicate can match the
@@ -531,24 +533,24 @@ def qq_data(
 
 def benchmark_forest_data(trace: az.InferenceData, hdi_prob: float = 0.90) -> pd.DataFrame:
     """
-    Per-benchmark posterior mean and HDI of ``kappa`` and ``difficulty``, one
+    Per-benchmark posterior mean and HDI of ``sigma`` and ``difficulty``, one
     row per benchmark, sorted by difficulty.
 
     Both are model parameters, not per-observation quantities, so this runs
     on the full trace regardless of ``max_draws``. In native model units
-    (difficulty is centred at 0 by its zero-sum prior; kappa is the Beta
-    concentration) rather than the EDI scale, since the transform to EDI
+    (difficulty is centred at 0 by its zero-sum prior; sigma is the Beta's
+    SD at mu = 0.5) rather than the EDI scale, since the transform to EDI
     lives in :mod:`eci.bayesian` and isn't available here - this is a
     diagnostic view of the fit's own parameters, not the published scores.
     """
-    posterior = trace.posterior.dataset[["kappa", "difficulty"]]
+    posterior = trace.posterior.dataset[["sigma", "difficulty"]]
     hdi = az.hdi(posterior, prob=hdi_prob)
     mean = posterior.mean(dim=("chain", "draw"))
     forest = pd.DataFrame({
         "benchmark": trace.posterior.coords["benchmark"].values,
-        "kappa_mean": mean["kappa"].values,
-        "kappa_lo": hdi["kappa"].sel(ci_bound="lower").values,
-        "kappa_hi": hdi["kappa"].sel(ci_bound="upper").values,
+        "sigma_mean": mean["sigma"].values,
+        "sigma_lo": hdi["sigma"].sel(ci_bound="lower").values,
+        "sigma_hi": hdi["sigma"].sel(ci_bound="upper").values,
         "difficulty_mean": mean["difficulty"].values,
         "difficulty_lo": hdi["difficulty"].sel(ci_bound="lower").values,
         "difficulty_hi": hdi["difficulty"].sel(ci_bound="upper").values,
@@ -722,7 +724,7 @@ def summarise_evaluation(results: dict) -> str:
     flagged = per_benchmark[(per_benchmark["ppp"] < 0.05) | (per_benchmark["ppp"] > 0.95)]
     lines += [
         "",
-        "Per-benchmark spread checks (what the per-benchmark kappa is for)",
+        "Per-benchmark spread checks (what the per-benchmark sigma is for)",
     ]
     for name in ("variance", "iqr"):
         values = per_benchmark.loc[per_benchmark["statistic"] == name, "ppp"]
@@ -818,6 +820,11 @@ def _draw_forest(ax, forest: pd.DataFrame, column: str, title: str, log_scale: b
     ax.tick_params(axis="x", labelsize=8)
     if log_scale:
         ax.set_xscale("log")
+        # Plain labels (0.04, 0.1, 0.2) rather than 4x10^-2: the range spans
+        # well under two decades, so a few ticks per decade are needed.
+        ax.xaxis.set_major_locator(ticker.LogLocator(subs=(1.0, 2.0, 4.0, 6.0)))
+        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda value, _: f"{value:g}"))
+        ax.xaxis.set_minor_formatter(ticker.NullFormatter())
 
 
 def plot_evaluation(results: dict, path: "str | Path") -> Path:
@@ -826,7 +833,7 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
     Page 1 is the metrics table — every headline number, i.e. ``results["metrics"]``.
     Page 2 is the two QQ plots, which are here because they
     show something a table cannot: *where* on the score scale the fit departs
-    from the data. Page 3 is a forest plot of every benchmark's ``kappa`` and
+    from the data. Page 3 is a forest plot of every benchmark's ``sigma`` and
     ``difficulty`` (posterior mean and 90% HDI, from ``results["forest"]``) -
     the per-benchmark item parameters, visually, in place of a CSV.
     """
@@ -877,7 +884,7 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
             "Per-benchmark item parameters (posterior mean, 90% HDI)",
             fontsize=11, weight="bold", x=0.06, ha="left",
         )
-        _draw_forest(axes[0], forest, "kappa", "kappa (concentration, log scale)", log_scale=True)
+        _draw_forest(axes[0], forest, "sigma", "sigma (noise SD at mu = 0.5, log scale)", log_scale=True)
         _draw_forest(axes[1], forest, "difficulty", "difficulty (model units)")
         axes[1].axvline(0, color="#B45309", ls="--", lw=1)
         fig.tight_layout(rect=(0, 0, 1, 0.97))
@@ -890,7 +897,7 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
 def save_evaluation(results: dict, output_dir: "str | Path") -> list[Path]:
     """
     Write the evaluation as ``evaluation_report.pdf``: the metrics table, the
-    two QQ plots, and a forest plot of every benchmark's ``kappa`` and
+    two QQ plots, and a forest plot of every benchmark's ``sigma`` and
     ``difficulty`` (see :func:`plot_evaluation`).
 
     The tables behind it - sampler parameters, per-benchmark accuracy, LOO,
