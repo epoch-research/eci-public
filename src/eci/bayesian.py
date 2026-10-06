@@ -166,7 +166,7 @@ def _prepare_performance(df: pd.DataFrame, performance_clip_eps: float) -> np.nd
 def build_bayesian_model(
     df: pd.DataFrame,
     priors: BayesianPriors = BayesianPriors(),
-    performance_clip_eps: float = 1e-4,
+    performance_clip_eps: float = 1e-3,
     centred: bool = True,
 ) -> pm.Model:
     """
@@ -301,7 +301,7 @@ def _anchor_transform(
 def fit_bayesian_eci(
     df: pd.DataFrame,
     priors: BayesianPriors = BayesianPriors(),
-    performance_clip_eps: float = 1e-4,
+    performance_clip_eps: float = 1e-3,
     centred: bool = True,
     draws: int = 4000,
     tune: int = 2000,

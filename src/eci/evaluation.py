@@ -562,7 +562,7 @@ def evaluate_fit(
     trace: az.InferenceData,
     df: pd.DataFrame,
     max_draws: int = 2000,
-    performance_clip_eps: float = 1e-4,
+    performance_clip_eps: float = 1e-3,
 ) -> dict:
     """
     Run the whole suite and return it as a dict of tables.
