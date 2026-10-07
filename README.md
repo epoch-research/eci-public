@@ -147,15 +147,12 @@ noise SD `sigma_b`:
     kappa[b]  = 1 / (4 * sigma[b]^2) - 1
     y[m, b]  ~ Beta(mu * kappa[b], (1 - mu) * kappa[b])
 
-The Beta's variance is `mu * (1 - mu) / (kappa_b + 1)`, so its SD is
-`2 * sqrt(mu * (1 - mu)) * sigma_b`: `sigma_b` is the SD of the scores where the
-curve passes 50%, and the largest it gets anywhere on that benchmark, shrinking
-towards 0 and 1. It has to stay below 0.5, where `kappa_b` reaches 0. A high
-`sigma_b` means the benchmark's scores scatter widely around the curve —
-something other than capability and difficulty is driving them; a low
-`sigma_b` means the curve explains them tightly. One `sigma` per benchmark lets
-the fit learn from the benchmarks that are most informative about capability.
-`edi_df` reports `sigma` posteriors alongside difficulty and slope.
+The Beta's standard deviation (SD) is `2 * sqrt(mu * (1 - mu)) * sigma_b`. Thus at 
+`mu=0.5` the SD is maximised and takes value `sigma_b`, and it shrinks as `mu` 
+approaches 0 or 1. `sigma_b` is bounded above by 0.5 as the results are scores in 
+[0,1]. `sigma_b` varies per benchmark to reflect how noisy each benchmarks' results 
+are; a high value could be either high run-to-run variance or a poor fit of the 
+ECI modelling assumptions.
 
 The priors are weakly informative:
 
