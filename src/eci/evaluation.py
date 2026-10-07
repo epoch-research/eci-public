@@ -113,9 +113,9 @@ METRIC_GUIDANCE = {
     "coverage_0.95_loo": "ideal 0.95; out-of-sample",
     # posterior predictive
     # Pooled checks are sensitive but unspecific: they mix the spread of the
-    # fitted curve (32% of total variance) with the scatter sigma governs
-    # (68%), and over 2,780 rows they flag biases far too small for any one
-    # benchmark to see. Read them as "something small is off", not as a verdict.
+    # fitted curve with the scatter sigma governs, and over thousands of rows
+    # they flag biases far too small for any one benchmark to see. Read them
+    # as "something small is off", not as a verdict.
     "ppp_mean": "ideal 0.5; pooled",
     "ppp_sd": "pooled; sigma is judged per benchmark",
     "ppp_variance": "pooled; sigma is judged per benchmark",
@@ -277,19 +277,16 @@ def predictive_accuracy(
 
     ``per_benchmark`` deliberately does **not** carry raw RMSE. Per benchmark
     that number is not a measure of fit: it is a restatement of ``sigma``,
-    which the fit already reports. Measured on the published data, a
-    benchmark's RMSE regresses on the predictive SD the model itself claims
-    with R^2 = 0.93, and ranks against the fitted noise level at spearman
-    0.92 (measured on ``kappa``, the concentration ``sigma`` sets) - so
-    ranking benchmarks by RMSE just re-ranks them by the noise parameter the
-    model already estimated. A high-RMSE benchmark is not one the fit handles
-    badly; it is one the fit already knows is noisy.
+    which the fit already reports. A benchmark's RMSE tracks the predictive
+    SD the model itself claims for it, so ranking benchmarks by RMSE just
+    re-ranks them by the noise parameter the model already estimated. A
+    high-RMSE benchmark is not one the fit handles badly; it is one the fit
+    already knows is noisy.
 
     What the ratio ``rmse_ratio = rmse / predicted_sd`` asks instead is
     whether that noise estimate is *honest*: near 1 the benchmark scatters as
     much as the model claims, below 1 the model reserves more spread than it
-    needs, above 1 it is over-confident there. It ranks benchmarks differently
-    from raw RMSE - on the published data only 2 of the top 5 coincide.
+    needs, above 1 it is over-confident there.
 
     Scored against the raw observed scores, not the clipped ones the
     likelihood sees, so the boundary rows are judged honestly.
@@ -410,10 +407,9 @@ def posterior_predictive_checks(
 
     Reported as mid-p values - ``P(T_rep > T_obs) + 0.5 * P(T_rep = T_obs)``.
     The uncorrected ``P(T_rep >= T_obs)`` counts a tie as a disagreement,
-    which pins a statistic the model reproduces exactly at 1.0 instead of 0.5.
-    On the published data that alone accounted for 78 of 115 apparently
-    failing per-benchmark checks: every benchmark with no scores above 0.95
-    has ``T_obs = 0``, and ``P(T_rep >= 0) = 1`` no matter how the model
+    which pins a statistic the model reproduces exactly at 1.0 instead of 0.5:
+    every benchmark with no scores above 0.95 has ``T_obs = 0`` for
+    ``frac_above_0.95``, and ``P(T_rep >= 0) = 1`` no matter how the model
     behaves.
 
     These p-values are conservative - the same data informed the posterior -
@@ -422,10 +418,8 @@ def posterior_predictive_checks(
     Read the spread statistics (sd, variance, iqr) **per benchmark**, not on
     the OVERALL row. Pooled across benchmarks they measure the spread of the
     fitted curve itself, which partial pooling deliberately shrinks, so the
-    pooled p-value runs low even for a model that is right: on a correctly
-    specified synthetic fit the ten per-benchmark variance p-values ranged
-    0.11-0.65 while the pooled one was 0.0005. The per-benchmark rows ask the
-    question ``sigma`` is actually there to answer.
+    pooled p-value runs low even for a model that is right. The per-benchmark
+    rows ask the question ``sigma`` is actually there to answer.
 
     ``min`` and ``max`` are degenerate wherever the data contain scores of
     exactly 0 or 1: the Beta has no mass there, so no replicate can match the

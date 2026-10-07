@@ -99,8 +99,7 @@ def _index_data(df: pd.DataFrame):
     """Map the long-format input onto contiguous model/benchmark indices.
 
     Returns (model_ids, model_names, bench_ids, bench_names, model_idx,
-    bench_idx), with the ids in first-appearance order, matching
-    :func:`eci.fitting.fit_eci_model`.
+    bench_idx), with the ids in first-appearance order.
     """
     model_ids = df["model_id"].unique()
     bench_ids = df["benchmark_id"].unique()
@@ -241,8 +240,8 @@ def _anchor_transform(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-draw (a, b) of ``eci = a + b * capability``.
 
-    The vectorised twin of :func:`eci.fitting._affine_map`: one map per draw,
-    each sending that draw's own anchor capabilities to eci_low / eci_high.
+    One map per draw, each sending that draw's own anchor capabilities to
+    eci_low / eci_high.
     """
     low = capability[:, anchor_low_idx]
     high = capability[:, anchor_high_idx]

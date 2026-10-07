@@ -229,9 +229,7 @@ Notes on metrics:
 - **Accuracy is scored against the raw scores, the distributional checks
   against the clipped ones.** The Beta likelihood is never shown a score of
   exactly 0 or 1, so it cannot be asked to have predicted one; scoring the PIT
-  against raw scores makes clipping look like miscalibration. On a correctly
-  specified synthetic fit, 90% coverage reads 0.78 against raw scores and 0.96
-  against clipped ones.
+  against raw scores makes clipping look like miscalibration.
 - **Calibration is reported in-sample and leave-one-out.** The in-sample PIT
   scores each observation against a posterior fitted to it, which bunches the
   PIT towards 0.5 and makes the intervals look wider than they are. The
@@ -240,15 +238,13 @@ Notes on metrics:
   it alongside the k counts.
 - **The p-values are mid-p**, `P(T_rep > T_obs) + 0.5 * P(T_rep = T_obs)`.
   The uncorrected `P(T_rep >= T_obs)` counts a tie as a disagreement, pinning
-  a statistic the model reproduces exactly at 1.0 instead of 0.5 — on the
-  published data that alone accounted for 78 of 115 apparently failing
-  per-benchmark checks, since a benchmark with no scores above 0.95 has
-  `T_obs = 0` and `P(T_rep >= 0) = 1` however the model behaves.
+  a statistic the model reproduces exactly at 1.0 instead of 0.5: a benchmark
+  with no scores above 0.95 has `T_obs = 0` for `frac_above_0.95`, and
+  `P(T_rep >= 0) = 1` however the model behaves.
 - **Consider per-benchmark spread checks (sd, variance, IQR) alongside pooled.**
   Pooled across benchmarks they measure the spread of the fitted curve, which
   partial pooling deliberately shrinks, so the pooled p-value runs low even
-  for a model that is right. On that same synthetic fit the ten per-benchmark
-  variance p-values ranged 0.11–0.65 while the pooled one was 0.0005.
+  for a model that is right.
 
 `evaluate=True` keeps the pointwise log likelihood and draws a replicated
 dataset per posterior draw, both of which are (draws × observations) arrays,
