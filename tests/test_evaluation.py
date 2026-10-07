@@ -189,6 +189,22 @@ class TestCalibration:
         pit = results["pit"]
         assert len(pit) == len(df)
         assert pit["pit"].between(0, 1).all()
+        assert pit["pit_loo"].between(0, 1).all()
+
+    def test_loo_pit_is_not_the_in_sample_pit(self, evaluated):
+        """The LOO weights have to reach the PIT: identical columns would mean
+        the weighting silently fell back to the plain mean."""
+        results, _ = evaluated
+        pit = results["pit"]
+        assert not np.allclose(pit["pit"], pit["pit_loo"])
+
+    def test_loo_coverage_is_close_to_nominal(self, evaluated):
+        results, _ = evaluated
+        overall = results["calibration"]
+        overall = overall[overall["benchmark"] == "OVERALL"].iloc[0]
+        assert abs(overall["coverage_0.9_loo"] - 0.90) < 0.07
+        assert abs(overall["coverage_0.5_loo"] - 0.50) < 0.12
+        assert abs(overall["mean_pit_loo"] - 0.5) < 0.07
 
     def test_coverage_is_close_to_nominal(self, evaluated):
         """The intervals should be the width they claim; this is the check
@@ -205,6 +221,8 @@ class TestCalibration:
         qq = results["qq"]
         assert len(qq["pit_sorted"]) == len(qq["pit_uniform"]) == len(df)
         assert np.all(np.diff(qq["pit_sorted"]) >= 0)
+        assert len(qq["pit_loo_sorted"]) == len(df)
+        assert np.all(np.diff(qq["pit_loo_sorted"]) >= 0)
         assert (qq["replicated_ci_low"] <= qq["replicated_ci_high"]).all()
         assert len(qq["observed_quantiles"]) == len(qq["quantile_levels"])
 

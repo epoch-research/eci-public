@@ -230,9 +230,9 @@ to disk:
 | `accuracy` | Per benchmark: bias, the predictive SD the model claims, and `rmse_ratio` |
 | `loo_summary`, `loo_observations` | `elpd_loo`, `p_loo`, and the Pareto k of every observation |
 | `ppc` | Posterior predictive p-values (mid-p) for mean, sd, variance, IQR, min, max, skew and tail shares |
-| `calibration`, `pit` | PIT per observation, coverage against nominal, KS test of uniformity |
+| `calibration`, `pit` | PIT per observation, coverage against nominal, KS test of uniformity — each both in-sample and PSIS-LOO (`_loo` suffix) |
 | `forest` | Per benchmark: posterior mean and 90% HDI of `sigma` and `difficulty` — the PDF's page 3 |
-| `qq` | Arrays for the PIT-uniform and score QQ plots |
+| `qq` | Arrays for the PIT-uniform (in-sample and PSIS-LOO) and score QQ plots |
 
 Notes on metrics:
 - **Accuracy is scored against the raw scores, the distributional checks
@@ -241,6 +241,12 @@ Notes on metrics:
   against raw scores makes clipping look like miscalibration. On a correctly
   specified synthetic fit, 90% coverage reads 0.78 against raw scores and 0.96
   against clipped ones.
+- **Calibration is reported in-sample and leave-one-out.** The in-sample PIT
+  scores each observation against a posterior fitted to it, which bunches the
+  PIT towards 0.5 and makes the intervals look wider than they are. The
+  PSIS-LOO PIT reweights the same draws as if each point had been left out, so
+  it costs no refits; it is only as reliable as the point's Pareto k, so read
+  it alongside the k counts.
 - **The p-values are mid-p**, `P(T_rep > T_obs) + 0.5 * P(T_rep = T_obs)`.
   The uncorrected `P(T_rep >= T_obs)` counts a tie as a disagreement, pinning
   a statistic the model reproduces exactly at 1.0 instead of 0.5 — on the

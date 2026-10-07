@@ -103,6 +103,15 @@ METRIC_GUIDANCE = {
     "coverage_0.8": "ideal 0.80",
     "coverage_0.9": "ideal 0.90",
     "coverage_0.95": "ideal 0.95",
+    # The same on the PSIS-LOO PIT: free of the in-sample PIT's pull towards
+    # 0.5, but only as reliable as the Pareto k of the points behind it.
+    "mean_pit_loo": "ideal 0.5; out-of-sample",
+    "ks_statistic_loo": "lower is better; out-of-sample",
+    "ks_pvalue_loo": "low p = detectably non-uniform",
+    "coverage_0.5_loo": "ideal 0.50; out-of-sample",
+    "coverage_0.8_loo": "ideal 0.80; out-of-sample",
+    "coverage_0.9_loo": "ideal 0.90; out-of-sample",
+    "coverage_0.95_loo": "ideal 0.95; out-of-sample",
     # posterior predictive
     # Pooled checks are sensitive but unspecific: they mix the spread of the
     # fitted curve (32% of total variance) with the scatter sigma governs
@@ -173,6 +182,21 @@ def _observed(df: pd.DataFrame, clip_eps: float = 0.0) -> np.ndarray:
     """The observed scores, optionally clipped the way the likelihood saw them."""
     y = df["performance"].to_numpy(dtype=float)
     return np.clip(y, clip_eps, 1.0 - clip_eps) if clip_eps > 0 else y
+
+
+def _pit(y_rep: np.ndarray, y: np.ndarray, weights: "np.ndarray | None" = None) -> np.ndarray:
+    """PIT_i = P(y_rep_i <= y_i), per observation.
+
+    Unweighted it is the in-sample PIT. With the (n_obs, n_draws) PSIS-LOO
+    ``weights`` it is the LOO-PIT: the same share, but over the posterior
+    reweighted as if observation i had been left out of the fit.
+    """
+    below = y_rep <= y  # (n_draws, n_obs)
+    if weights is None:
+        return below.mean(axis=0)
+    # Normalised weights sum to 1 per observation; the clip only absorbs
+    # floating-point overshoot past the ends.
+    return np.clip((weights * below.T).sum(axis=1), 0.0, 1.0)
 
 
 def _groups(df: pd.DataFrame):
@@ -447,6 +471,7 @@ def calibration(
     df: pd.DataFrame,
     levels: tuple[float, ...] = DEFAULT_COVERAGE_LEVELS,
     clip_eps: float = 0.0,
+    loo_weights: "np.ndarray | None" = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Are the predictive intervals the width they claim to be?
@@ -457,6 +482,15 @@ def calibration(
     benchmark the share of observations inside each central interval (which
     should match the level) plus a Kolmogorov-Smirnov test of uniformity.
 
+    The in-sample PIT scores each observation against a posterior that was
+    fitted to it, so the observation sits nearer the middle of its own
+    predictive distribution than a new one would: the PIT bunches towards 0.5
+    and the intervals look wider than they are. When ``loo_weights``
+    (n_obs, n_draws) are supplied, the same checks are repeated on the
+    PSIS-LOO PIT, with a ``_loo`` suffix (``pit_loo``, ``coverage_0.9_loo``,
+    ...), which removes that double use of the data. The LOO-PIT of a point
+    with Pareto k > 0.7 is as unreliable as its importance weights.
+
     Scored against the clipped scores (``clip_eps``), for the reason given in
     the module docstring: the likelihood never saw an exact 0 or 1. Clipping
     still puts a clump of identical values at each clipped bound, which makes
@@ -466,44 +500,53 @@ def calibration(
     _require_group(trace, "posterior_predictive")
     y_rep = _predictive(trace)
     y = _observed(df, clip_eps)
-    pit = (y_rep <= y).mean(axis=0)
+    pits = {"": _pit(y_rep, y)}
+    if loo_weights is not None:
+        pits["_loo"] = _pit(y_rep, y, loo_weights)
 
     per_observation = df[["Model", "benchmark", "performance"]].reset_index(drop=True)
-    per_observation["pit"] = pit
+    for suffix, pit in pits.items():
+        per_observation[f"pit{suffix}"] = pit
 
     rows = []
     for name, mask in _groups(df):
-        pit_b = pit[mask]
-        # The asymptotic p-value: the exact one overflows past a few
-        # thousand observations, and the PIT is tied anyway (it is a
-        # share of a finite number of draws), which the exact test
-        # assumes away.
-        ks = stats.kstest(pit_b, "uniform", method="asymp")
-        row = {
-            "benchmark": name,
-            "n_obs": int(mask.sum()),
-            "mean_pit": float(pit_b.mean()),
-            "ks_statistic": float(ks.statistic),
-            "ks_pvalue": float(ks.pvalue),
-        }
-        for level in levels:
-            tail = (1.0 - level) / 2.0
-            row[f"coverage_{level:g}"] = float(
-                ((pit_b >= tail) & (pit_b <= 1.0 - tail)).mean()
-            )
+        row = {"benchmark": name, "n_obs": int(mask.sum())}
+        for suffix, pit in pits.items():
+            pit_b = pit[mask]
+            # The asymptotic p-value: the exact one overflows past a few
+            # thousand observations, and the PIT is tied anyway (it is a
+            # share of a finite number of draws), which the exact test
+            # assumes away.
+            ks = stats.kstest(pit_b, "uniform", method="asymp")
+            row[f"mean_pit{suffix}"] = float(pit_b.mean())
+            row[f"ks_statistic{suffix}"] = float(ks.statistic)
+            row[f"ks_pvalue{suffix}"] = float(ks.pvalue)
+            for level in levels:
+                tail = (1.0 - level) / 2.0
+                row[f"coverage_{level:g}{suffix}"] = float(
+                    ((pit_b >= tail) & (pit_b <= 1.0 - tail)).mean()
+                )
         rows.append(row)
     return per_observation, pd.DataFrame(rows)
 
 
 def qq_data(
-    trace: az.InferenceData, df: pd.DataFrame, n_quantiles: int = 200, clip_eps: float = 0.0
+    trace: az.InferenceData,
+    df: pd.DataFrame,
+    n_quantiles: int = 200,
+    clip_eps: float = 0.0,
+    loo_weights: "np.ndarray | None" = None,
 ) -> dict:
     """
     Arrays for the two QQ plots, pooled over all observations.
 
     - PIT against Uniform(0, 1): the calibration plot. Points on the diagonal
       mean the predictive distribution has the right shape; an S-curve means
-      the intervals are systematically too wide or too narrow.
+      the intervals are systematically too wide or too narrow. With
+      ``loo_weights`` the PSIS-LOO PIT is added as ``pit_loo_sorted``, so the
+      plot can show how much of any apparent over-width is the in-sample PIT
+      scoring points against a fit that has already seen them (see
+      :func:`calibration`).
     - Observed score quantiles against posterior predictive quantiles, with a
       90% band from the replicated datasets, which shows *where* on the score
       scale the fit departs from the data.
@@ -512,11 +555,11 @@ def qq_data(
     y_rep = _predictive(trace)
     observed = _observed(df, clip_eps)
     y = np.sort(observed)
-    pit = np.sort((y_rep <= observed).mean(axis=0))
+    pit = np.sort(_pit(y_rep, observed))
 
     levels = np.linspace(0, 1, n_quantiles + 2)[1:-1]
     replicated = np.percentile(y_rep, levels * 100, axis=1)  # (n_quantiles, n_draws)
-    return {
+    qq = {
         "pit_sorted": pit,
         "pit_uniform": (np.arange(1, len(pit) + 1) - 0.5) / len(pit),
         "quantile_levels": levels,
@@ -525,6 +568,9 @@ def qq_data(
         "replicated_ci_low": np.quantile(replicated, 0.05, axis=1),
         "replicated_ci_high": np.quantile(replicated, 0.95, axis=1),
     }
+    if loo_weights is not None:
+        qq["pit_loo_sorted"] = np.sort(_pit(y_rep, observed, loo_weights))
+    return qq
 
 
 def benchmark_forest_data(trace: az.InferenceData, hdi_prob: float = 0.90) -> pd.DataFrame:
@@ -589,7 +635,9 @@ def evaluate_fit(
 
     loo_summary, loo_observations, weights = loo_diagnostics(thinned, df)
     accuracy, totals = predictive_accuracy(thinned, df, loo_weights=weights)
-    pit, coverage = calibration(thinned, df, clip_eps=performance_clip_eps)
+    pit, coverage = calibration(
+        thinned, df, clip_eps=performance_clip_eps, loo_weights=weights
+    )
     ppc = posterior_predictive_checks(thinned, df, clip_eps=performance_clip_eps)
     results = {
         "sampler_summary": sampler_summary,
@@ -601,7 +649,7 @@ def evaluate_fit(
         "calibration": coverage,
         "pit": pit,
         "forest": benchmark_forest_data(trace),
-        "qq": qq_data(thinned, df, clip_eps=performance_clip_eps),
+        "qq": qq_data(thinned, df, clip_eps=performance_clip_eps, loo_weights=weights),
     }
     results["metrics"] = _metrics_table(results, totals, df)
     return results
@@ -699,12 +747,24 @@ def summarise_evaluation(results: dict) -> str:
         "",
         "Calibration (share of observations inside each central interval)",
     ]
-    for column in [c for c in coverage.index if c.startswith("coverage_")]:
-        level = column.split("_")[1]
-        lines.append(f"  {level:>18}     {coverage[column]:.3f}")
+    # One column per PIT: in-sample always, PSIS-LOO when the weights were there.
+    suffixes = ["", "_loo"] if "mean_pit_loo" in coverage.index else [""]
+    if len(suffixes) > 1:
+        lines.append(f"  {'':<18}{'in-sample':>10}{'LOO':>10}")
+
+    def row(label, metric, fmt=".3f"):
+        values = "".join(f"{coverage[metric + s]:>10{fmt}}" for s in suffixes)
+        return f"  {label:<18}{values}"
+
+    for column in [c for c in coverage.index
+                   if c.startswith("coverage_") and not c.endswith("_loo")]:
+        lines.append(row(f"{column.split('_')[1]} interval", column))
     lines += [
-        f"  mean PIT           {coverage['mean_pit']:.3f} (0.5 when calibrated)",
-        f"  KS vs uniform      {coverage['ks_statistic']:.3f} (p = {coverage['ks_pvalue']:.3g})",
+        row("mean PIT", "mean_pit") + "   (0.5 when calibrated)",
+        row("KS vs uniform", "ks_statistic"),
+        row("  KS p-value", "ks_pvalue", ".3g"),
+    ]
+    lines += [
         "",
         "Posterior predictive p-values, pooled (0.5 is ideal, 0/1 is a red flag)",
     ]
@@ -847,7 +907,11 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
         fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
 
         # Calibration: are the predictive distributions the right shape?
-        axes[0].plot(qq["pit_uniform"], qq["pit_sorted"], lw=1.6, color="#2563A8")
+        axes[0].plot(qq["pit_uniform"], qq["pit_sorted"], lw=1.6, color="#2563A8",
+                     label="in-sample")
+        if "pit_loo_sorted" in qq:
+            axes[0].plot(qq["pit_uniform"], qq["pit_loo_sorted"], lw=1.6, color="#0F766E",
+                         label="PSIS-LOO")
         axes[0].plot([0, 1], [0, 1], color="#B45309", ls="--", lw=1)
         axes[0].set(
             xlabel="uniform quantile", ylabel="PIT quantile",
@@ -857,6 +921,8 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
             0.03, 0.95, "above the line = intervals too wide\nbelow = too narrow",
             transform=axes[0].transAxes, fontsize=8, va="top", color="#5A6078",
         )
+        if "pit_loo_sorted" in qq:
+            axes[0].legend(loc="lower right", fontsize=9)
 
         # Fit: where on the score scale do observed and predicted diverge?
         axes[1].fill_betweenx(
