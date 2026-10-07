@@ -108,7 +108,7 @@ Everything is returned on the ECI scale, defined by two anchor models
 
 Both fits carry the same interval columns, cut from their own draws: the
 least-squares fit takes quantiles of the bootstrap draws, the Bayesian fit
-takes the 90% highest-density interval of the posterior. Either way each draw
+quantiles of the posterior draws. Either way each draw
 is re-anchored with its own scale transform, so the anchor models sit at
 exactly 130/150 in every draw; the anchors themselves get NaN intervals, being
 pinned by definition.
@@ -132,11 +132,9 @@ print(draws["trace"])  # the full arviz.InferenceData
 ```
 
 `eci` and `edi` are posterior means; the `_ci_low` / `_ci_high` columns are
-90% **highest-density intervals** — the narrowest window holding 90% of the
-posterior. The same applies to `discriminability_scaled` and `sigma`, whose
-posteriors are skewed and where an HDI is meaningfully tighter than equal
-tails. Pass `interval="eti"` for equal-tailed intervals (5th/95th percentiles)
-instead, or `ci_level=` for a different mass.
+90% **equal-tailed intervals** — the 5th and 95th percentiles of the
+posterior. The same applies to `discriminability_scaled` and `sigma`. Pass
+`ci_level=` for a different mass, e.g. `ci_level=0.95`.
 
 Scores live in [0, 1], consistent with a Beta likelihood, with a per-benchmark
 noise SD `sigma_b`:
@@ -209,7 +207,7 @@ python scripts/fit_eci.py --evaluate
 `save_evaluation` writes a single file, `evaluation_report.pdf`, with three
 pages: the metrics table; the two QQ plots, which show *where* on the score 
 scale the fit departs from the data; and a forest plot of every benchmark's 
-`sigma` and `difficulty` (posterior mean and 90% HDI). 
+`sigma` and `difficulty` (posterior mean and 90% interval). 
 
 The suite looks at sampling, accuracy and calibration metrics. 
 `draws["evaluation"]` (passed to `save_evaluation`) stores every data table 
@@ -224,7 +222,7 @@ to disk:
 | `loo_summary`, `loo_observations` | `elpd_loo`, `p_loo`, and the Pareto k of every observation |
 | `ppc` | Posterior predictive p-values (mid-p) for mean, sd, variance, IQR, min, max, skew and tail shares |
 | `calibration`, `pit` | PIT per observation, coverage against nominal, KS test of uniformity — each both in-sample and PSIS-LOO (`_loo` suffix) |
-| `forest` | Per benchmark: posterior mean and 90% HDI of `sigma` and `difficulty` — the PDF's page 3 |
+| `forest` | Per benchmark: posterior mean and 90% interval of `sigma` and `difficulty` — the PDF's page 3 |
 | `qq` | Arrays for the PIT-uniform (in-sample and PSIS-LOO) and score QQ plots |
 
 Notes on metrics:

@@ -12,7 +12,7 @@ sampled by hand; :func:`fit_bayesian_eci` calls it, runs ``pm.sample``, and
 does everything downstream of the raw posterior - convergence warnings,
 rescaling each draw onto the ECI scale via the anchor models, and (with
 ``evaluate=True``) handing the trace to :mod:`eci.evaluation`. Everything
-else here is a private helper behind one of those two: pulling HDI/ETI
+else here is a private helper behind one of those two: pulling equal-tailed
 intervals out of an array, indexing the input data, and the per-draw anchor
 transform.
 """
@@ -47,9 +47,6 @@ _DIAGNOSTIC_VARS = [
     "capability", "difficulty", "slope", "sigma",
     "tau_cd", "tau_alpha", "sigma_median", "tau_sigma",
 ]
-
-# How the reported intervals are cut out of the posterior.
-INTERVAL_KINDS = ("hdi", "eti")
 
 
 @dataclass(frozen=True)
@@ -86,32 +83,11 @@ class BayesianPriors:
     tau_sigma: tuple[float, float] = field(default=(float(np.log(0.5)), 0.5))
 
 
-def _hdi(values: np.ndarray, prob: float) -> tuple[np.ndarray, np.ndarray]:
-    """Highest-density interval of each column of ``values`` (draws x items).
-
-    The narrowest window containing ``prob`` of the draws, found by sliding it
-    over the sorted draws. For a skewed posterior - a slope or a sigma - this
-    is a tighter and more honest interval than cutting equal tails, and it
-    never places the point estimate outside its own interval.
-    """
-    n_draws = values.shape[0]
-    n_inside = max(1, min(n_draws, int(np.floor(prob * n_draws))))
-    ordered = np.sort(values, axis=0)
-    # widths[i] is the span of the window starting at draw i
-    widths = ordered[n_inside - 1:] - ordered[: n_draws - n_inside + 1]
-    start = np.argmin(widths, axis=0)
-    columns = np.arange(values.shape[1])
-    return ordered[start, columns], ordered[start + n_inside - 1, columns]
-
-
-def _interval(values: np.ndarray, prob: float, kind: str) -> tuple[np.ndarray, np.ndarray]:
-    """Lower and upper bounds of each column's posterior interval."""
-    if kind == "hdi":
-        return _hdi(values, prob)
-    if kind == "eti":
-        tail = (1.0 - prob) / 2.0
-        return tuple(np.quantile(values, [tail, 1.0 - tail], axis=0))
-    raise ValueError(f"Unknown interval={kind!r}. Choose one of {INTERVAL_KINDS}.")
+def _interval(values: np.ndarray, prob: float) -> tuple[np.ndarray, np.ndarray]:
+    """Equal-tailed interval of each column of ``values`` (draws x items):
+    the (1 - prob) / 2 and (1 + prob) / 2 quantiles."""
+    tail = (1.0 - prob) / 2.0
+    return tuple(np.quantile(values, [tail, 1.0 - tail], axis=0))
 
 
 def _lognormal(name: str, prior: tuple[float, float], dims: str | None = None):
@@ -296,7 +272,6 @@ def fit_bayesian_eci(
     anchor_model_high: str = DEFAULT_ANCHOR_MODEL_HIGH,
     anchor_eci_high: float = DEFAULT_ANCHOR_ECI_HIGH,
     ci_level: float = 0.90,
-    interval: str = "hdi",
     evaluate: bool = False,
     evaluation_max_draws: int = 2000,
     progressbar: bool = True,
@@ -319,12 +294,8 @@ def fit_bayesian_eci(
         anchor_model_low / anchor_eci_low / anchor_model_high /
             anchor_eci_high: the models that define the ECI scale and their
             fixed values.
-        ci_level: posterior mass the reported intervals carry (0.90 by
-            default, matching the least-squares fit's convention).
-        interval: how to cut that mass out of the posterior - "hdi" for the
-            highest-density interval (the default: the narrowest window
-            holding ci_level of the draws), or "eti" for equal tails, i.e.
-            the 5th and 95th percentiles at ci_level=0.90.
+        ci_level: posterior mass the reported equal-tailed intervals carry
+            (0.90 by default, i.e. the 5th and 95th percentiles).
         evaluate: also run the diagnostic suite in :mod:`eci.evaluation` and
             return it under draws["evaluation"]. This keeps the pointwise log
             likelihood and draws a replicated dataset per posterior draw,
@@ -428,7 +399,7 @@ def fit_bayesian_eci(
         )
 
     def summarise(values: np.ndarray, name: str) -> dict[str, np.ndarray]:
-        low, high = _interval(values, ci_level, interval)
+        low, high = _interval(values, ci_level)
         return {name: values.mean(axis=0), f"{name}_ci_low": low, f"{name}_ci_high": high}
 
     eci_df = pd.DataFrame(

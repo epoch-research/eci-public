@@ -28,7 +28,7 @@ dependencies = [
     "tqdm>=4.60",
     # The Bayesian fit is the default, so its dependencies are not optional.
     # arviz>=1.0 replaced InferenceData with xarray's DataTree and renamed
-    # several stats functions' arguments/return attributes (bfmi, loo, hdi);
+    # several stats functions' arguments/return attributes (bfmi, loo);
     # the evaluation suite uses that new API and no longer runs on arviz<1.0.
     "pymc>=6.0",
     "arviz>=1.0",

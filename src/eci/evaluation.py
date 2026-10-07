@@ -572,10 +572,11 @@ def qq_data(
     return qq
 
 
-def benchmark_forest_data(trace: az.InferenceData, hdi_prob: float = 0.90) -> pd.DataFrame:
+def benchmark_forest_data(trace: az.InferenceData, ci_level: float = 0.90) -> pd.DataFrame:
     """
-    Per-benchmark posterior mean and HDI of ``sigma`` and ``difficulty``, one
-    row per benchmark, sorted by difficulty.
+    Per-benchmark posterior mean and equal-tailed interval (``ci_level`` of
+    the mass) of ``sigma`` and ``difficulty``, one row per benchmark, sorted
+    by difficulty.
 
     Both are model parameters, not per-observation quantities, so this runs
     on the full trace regardless of ``max_draws``. In native model units
@@ -585,16 +586,17 @@ def benchmark_forest_data(trace: az.InferenceData, hdi_prob: float = 0.90) -> pd
     diagnostic view of the fit's own parameters, not the published scores.
     """
     posterior = trace.posterior.dataset[["sigma", "difficulty"]]
-    hdi = az.hdi(posterior, prob=hdi_prob)
+    tail = (1.0 - ci_level) / 2.0
+    bounds = posterior.quantile([tail, 1.0 - tail], dim=("chain", "draw"))
     mean = posterior.mean(dim=("chain", "draw"))
     forest = pd.DataFrame({
         "benchmark": trace.posterior.coords["benchmark"].values,
         "sigma_mean": mean["sigma"].values,
-        "sigma_lo": hdi["sigma"].sel(ci_bound="lower").values,
-        "sigma_hi": hdi["sigma"].sel(ci_bound="upper").values,
+        "sigma_lo": bounds["sigma"].isel(quantile=0).values,
+        "sigma_hi": bounds["sigma"].isel(quantile=1).values,
         "difficulty_mean": mean["difficulty"].values,
-        "difficulty_lo": hdi["difficulty"].sel(ci_bound="lower").values,
-        "difficulty_hi": hdi["difficulty"].sel(ci_bound="upper").values,
+        "difficulty_lo": bounds["difficulty"].isel(quantile=0).values,
+        "difficulty_hi": bounds["difficulty"].isel(quantile=1).values,
     })
     return forest.sort_values("difficulty_mean").reset_index(drop=True)
 
@@ -860,7 +862,7 @@ def _draw_metrics_page(fig, metrics: pd.DataFrame) -> None:
 
 
 def _draw_forest(ax, forest: pd.DataFrame, column: str, title: str, log_scale: bool = False):
-    """One horizontal forest plot: posterior mean and HDI per benchmark."""
+    """One horizontal forest plot: posterior mean and interval per benchmark."""
     y = np.arange(len(forest))
     mean, lo, hi = forest[f"{column}_mean"], forest[f"{column}_lo"], forest[f"{column}_hi"]
     ax.errorbar(
@@ -889,7 +891,7 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
     Page 2 is the two QQ plots, which are here because they
     show something a table cannot: *where* on the score scale the fit departs
     from the data. Page 3 is a forest plot of every benchmark's ``sigma`` and
-    ``difficulty`` (posterior mean and 90% HDI, from ``results["forest"]``) -
+    ``difficulty`` (posterior mean and 90% interval, from ``results["forest"]``) -
     the per-benchmark item parameters, visually, in place of a CSV.
     """
     path = Path(path)
@@ -942,7 +944,7 @@ def plot_evaluation(results: dict, path: "str | Path") -> Path:
 
         fig, axes = plt.subplots(1, 2, figsize=(11, max(4.8, 0.16 * len(forest) + 1.2)))
         fig.suptitle(
-            "Per-benchmark item parameters (posterior mean, 90% HDI)",
+            "Per-benchmark item parameters (posterior mean, 90% interval)",
             fontsize=11, weight="bold", x=0.06, ha="left",
         )
         _draw_forest(axes[0], forest, "sigma", "sigma (noise SD at mu = 0.5, log scale)", log_scale=True)
