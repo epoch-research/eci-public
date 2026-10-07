@@ -21,10 +21,6 @@ Typical use is through the fit itself::
 from pathlib import Path
 
 import arviz as az
-import matplotlib
-
-matplotlib.use("Agg")  # must precede importing pyplot
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
