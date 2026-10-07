@@ -23,9 +23,12 @@ distance to the observed scores, with bootstrap confidence intervals.
 See [Bayesian fit](#bayesian-fit-the-default) and
 [Least-squares fit](#least-squares-fit).
 
-For details on the methodology, see:
-- **Paper**: [A Rosetta Stone for AI Benchmarks](https://arxiv.org/abs/2512.00193)
-- **Website**: [Epoch Capabilities Index](https://epoch.ai/benchmarks/eci#overview)
+For more detail on the methodology, see the
+[Epoch Capabilities Index](https://epoch.ai/benchmarks/eci#overview) page.
+
+The ECI was originally motivated by the paper
+[A Rosetta Stone for AI Benchmarks](https://arxiv.org/abs/2512.00193). The
+paper describes an earlier version of the methodology.
 
 ## Installation
 
@@ -94,8 +97,9 @@ from eci import fit_eci_model
 eci_df, edi_df, draws = fit_eci_model(df, bootstrap_samples=100)
 ```
 
-Everything is returned on the ECI scale, defined by two anchor models
-(Claude 3.5 Sonnet = 130, GPT-5 = 150):
+The model is fit on an arbitrary raw scale, then mapped linearly onto the ECI
+scale by fixing two anchor models (Claude 3.5 Sonnet = 130, GPT-5 = 150).
+Everything is returned on the ECI scale:
 
 - `eci_df`: each model's `eci`, with confidence intervals.
 - `edi_df`: each benchmark's difficulty (`edi`) and its slope in ECI units
@@ -166,7 +170,7 @@ The priors are weakly informative:
 | `sigma_median` | `LogNormal(ln 0.1, 0.5)` | the typical benchmark's noise SD |
 | `tau_sigma` | `LogNormal(ln 0.5, 0.5)` | spread of `ln sigma_b` across benchmarks |
 
-Those two sum-to-zero constraints are what identify the fit. The noise prior
+Those two sum-to-zero constraints are what identify the fit on the raw scale. The noise prior
 is hierarchical: the benchmarks share a typical noise level, learned from all
 of them, so one with only a handful of scores is pulled towards it rather than
 towards a fixed guess.
