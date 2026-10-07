@@ -88,13 +88,6 @@ def main():
         "--seed", type=int, default=12345, help="Sampler seed (default: 12345)",
     )
     bayesian.add_argument(
-        "--non-centred",
-        action="store_true",
-        help="Sample the item parameters as unit-scale offsets rescaled by "
-             "their hyperparameter, instead of directly. Same posterior, "
-             "different geometry for the sampler",
-    )
-    bayesian.add_argument(
         "--evaluate",
         action="store_true",
         help="Run the diagnostic suite (convergence, accuracy, LOO, "
@@ -138,7 +131,6 @@ def main():
             chains=args.chains,
             target_accept=args.target_accept,
             random_seed=args.seed,
-            centred=not args.non_centred,
             evaluate=args.evaluate,
         )
     else:

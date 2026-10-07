@@ -183,14 +183,7 @@ eci_df, edi_df, draws = fit_bayesian_eci(df, priors=priors)
 ```
 
 The sampler runs a default 4 chains of 2000 tuning steps and 4000 draws at
-`target_accept=0.95`, and the item parameters are **centred** — drawn straight
-from their priors rather than as unit-scale offsets rescaled by their
-hyperparameter. `centred=False` (or `--non-centred`) switches to the other
-form. This may be useful for different priors but with the default priors, 
-parameters should stay centered. Note that the two parametrisations define the 
-*same* posterior and differ only in the coordinates NUTS explores, so this 
-is a sampling choice, not a modelling one. `sigma_b` is centred either way,
-since its truncation cannot be carried by a unit-scale offset.
+`target_accept=0.95`.
 
 
 ### Evaluating a fit

@@ -28,10 +28,9 @@ from matplotlib import ticker
 from matplotlib.backends.backend_pdf import PdfPages
 from scipy import stats
 
-# Parameters the diagnostics summarise. The model's unit-scale offsets
-# (capability_z and friends) are excluded: they are sampling coordinates, not
-# results, and their r_hat says nothing extra once the quantity they build is
-# converged.
+# Parameters the diagnostics summarise. kappa and log_slope are left out:
+# each is a one-to-one transform of a parameter already listed (sigma, slope),
+# so its r_hat and ESS say nothing extra.
 REPORTED_VARS = (
     "capability", "difficulty", "slope", "sigma",
     "tau_cd", "tau_alpha", "sigma_median", "tau_sigma",
@@ -229,7 +228,7 @@ def sampler_diagnostics(
     parameter, worst r_hat first.
 
     ``var_names`` defaults to the parameters the fit reports; pass None to
-    include the sampler's own unit-scale offsets as well.
+    include every variable in the trace.
     """
     per_parameter = az.summary(
         trace, var_names=list(var_names) if var_names else None, kind="diagnostics"
@@ -580,7 +579,7 @@ def benchmark_forest_data(trace: az.InferenceData, hdi_prob: float = 0.90) -> pd
 
     Both are model parameters, not per-observation quantities, so this runs
     on the full trace regardless of ``max_draws``. In native model units
-    (difficulty is centred at 0 by its zero-sum prior; sigma is the Beta's
+    (difficulty sums to 0 by its zero-sum prior; sigma is the Beta's
     SD at mu = 0.5) rather than the EDI scale, since the transform to EDI
     lives in :mod:`eci.bayesian` and isn't available here - this is a
     diagnostic view of the fit's own parameters, not the published scores.

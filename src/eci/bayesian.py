@@ -3,8 +3,7 @@ Bayesian fitting for the Epoch Capabilities Index (ECI).
 
 Implements the IRT curve as the mean of a per-observation Beta 
 likelihood sampled by MCMC. See the README's "Bayesian fit" section 
-for the model, the priors, the centred/non-centred sampling choice, 
-and how results are mapped onto the ECI scale.
+for the model, the priors, and how results are mapped onto the ECI scale.
 
 Besides the priors dataclass, two public entry points build and fit the model:
 :func:`build_bayesian_model` assembles the plain ``pm.Model`` (coordinates,
@@ -167,7 +166,6 @@ def build_bayesian_model(
     df: pd.DataFrame,
     priors: BayesianPriors = BayesianPriors(),
     performance_clip_eps: float = 1e-3,
-    centred: bool = True,
 ) -> pm.Model:
     """
     Build the PyMC model, ready to sample from or inspect.
@@ -186,10 +184,6 @@ def build_bayesian_model(
             unbounded reward for pushing those rows' mu down, and the model
             pays for it by lowering the capability of the models involved and
             raising the sigma of the benchmarks carrying the zeros.
-        centred: sample the item parameters directly (the default), or, when
-            False, as unit-scale offsets rescaled by their hyperparameter.
-            The two define the *same* posterior and differ only in the
-            coordinates NUTS explores to resolve divergence if needed.
 
     Returns:
         A ``pm.Model`` whose coordinates are the model and benchmark *names*
@@ -205,10 +199,7 @@ def build_bayesian_model(
         sigma_median = _lognormal("sigma_median", priors.sigma_median)
         tau_sigma = _lognormal("tau_sigma", priors.tau_sigma)
         # The prior is on the noise SD; the Beta takes the concentration it
-        # implies, inverting sigma = 1 / (2 sqrt(kappa + 1)). sigma stays
-        # centred even when centred=False: a non-centred offset cannot carry
-        # the truncation, whose normalising constant here depends on the
-        # hyperparameters.
+        # implies, inverting sigma = 1 / (2 sqrt(kappa + 1)).
         sigma = pm.Truncated(
             "sigma",
             pm.LogNormal.dist(mu=pm.math.log(sigma_median), sigma=tau_sigma),
@@ -218,17 +209,9 @@ def build_bayesian_model(
         )
         kappa = pm.Deterministic("kappa", 1.0 / (4.0 * sigma**2) - 1.0, dims="benchmark")
 
-        if centred:
-            capability = pm.Normal("capability", 0.0, tau_cd, dims="model")
-            difficulty = pm.ZeroSumNormal("difficulty", sigma=tau_cd, dims="benchmark")
-            log_slope = pm.ZeroSumNormal("log_slope", sigma=tau_alpha, dims="benchmark")
-        else:
-            capability_z = pm.Normal("capability_z", 0.0, 1.0, dims="model")
-            capability = pm.Deterministic("capability", capability_z * tau_cd, dims="model")
-            difficulty_z = pm.ZeroSumNormal("difficulty_z", sigma=1.0, dims="benchmark")
-            difficulty = pm.Deterministic("difficulty", difficulty_z * tau_cd, dims="benchmark")
-            log_slope_z = pm.ZeroSumNormal("log_slope_z", sigma=1.0, dims="benchmark")
-            log_slope = log_slope_z * tau_alpha
+        capability = pm.Normal("capability", 0.0, tau_cd, dims="model")
+        difficulty = pm.ZeroSumNormal("difficulty", sigma=tau_cd, dims="benchmark")
+        log_slope = pm.ZeroSumNormal("log_slope", sigma=tau_alpha, dims="benchmark")
         slope = pm.Deterministic("slope", pm.math.exp(log_slope), dims="benchmark")
 
         eta = slope[bench_idx] * (capability[model_idx] - difficulty[bench_idx])
@@ -302,7 +285,6 @@ def fit_bayesian_eci(
     df: pd.DataFrame,
     priors: BayesianPriors = BayesianPriors(),
     performance_clip_eps: float = 1e-3,
-    centred: bool = True,
     draws: int = 4000,
     tune: int = 2000,
     chains: int = 4,
@@ -329,12 +311,10 @@ def fit_bayesian_eci(
             benchmark, Model.
         priors: hyperpriors; see :class:`BayesianPriors`.
         performance_clip_eps: clip performance into [eps, 1 - eps].
-        centred: parameterisation; see :func:`build_bayesian_model`.
         draws: posterior draws kept per chain.
         tune: tuning (warm-up) steps per chain, discarded.
         chains: number of chains, run in parallel where cores allow.
-        target_accept: NUTS target acceptance rate. The centred parameterisation 
-            may need a higher value.
+        target_accept: NUTS target acceptance rate.
         random_seed: seed for the sampler.
         anchor_model_low / anchor_eci_low / anchor_model_high /
             anchor_eci_high: the models that define the ECI scale and their
@@ -386,7 +366,7 @@ def fit_bayesian_eci(
 
     sample_kwargs = dict(sampler_kwargs or {})
 
-    pymc_model = build_bayesian_model(df, priors, performance_clip_eps, centred)
+    pymc_model = build_bayesian_model(df, priors, performance_clip_eps)
     with pymc_model:
         trace = pm.sample(
             draws=draws,
