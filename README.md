@@ -206,7 +206,7 @@ python scripts/fit_eci.py --evaluate
 ```
 
 `save_evaluation` writes a single file, `evaluation_report.pdf`, with three
-pages: the metrics table; the two QQ plots, which show *where* on the score 
+pages: a metrics table; two QQ plots which show *where* on the score 
 scale the fit departs from the data; and a forest plot of every benchmark's 
 `sigma` and `difficulty` (posterior mean and 90% interval). 
 
@@ -217,7 +217,6 @@ to disk:
 
 | Table | Metrics |
 | --- | --- |
-| **`metrics`** | **Every headline number, flat — read this one first** |
 | `sampler_summary`, `sampler_parameters` | Divergences, r-hat, ESS (bulk and tail), MCSE, BFMI |
 | `accuracy` | Per benchmark: bias, the predictive SD the model claims, and `rmse_ratio` |
 | `loo_summary`, `loo_observations` | `elpd_loo`, `p_loo`, and the Pareto k of every observation |
@@ -226,26 +225,6 @@ to disk:
 | `forest` | Per benchmark: posterior mean and 90% interval of `sigma` and `difficulty` — the PDF's page 3 |
 | `qq` | Arrays for the PIT-uniform (in-sample and PSIS-LOO) and score QQ plots |
 
-Notes on metrics:
-- **Accuracy is scored against the raw scores, the distributional checks
-  against the clipped ones.** The Beta likelihood is never shown a score of
-  exactly 0 or 1, so it cannot be asked to have predicted one; scoring the PIT
-  against raw scores makes clipping look like miscalibration.
-- **Calibration is reported in-sample and leave-one-out.** The in-sample PIT
-  scores each observation against a posterior fitted to it, which bunches the
-  PIT towards 0.5 and makes the intervals look wider than they are. The
-  PSIS-LOO PIT reweights the same draws as if each point had been left out, so
-  it costs no refits; it is only as reliable as the point's Pareto k, so read
-  it alongside the k counts.
-- **The p-values are mid-p**, `P(T_rep > T_obs) + 0.5 * P(T_rep = T_obs)`.
-  The uncorrected `P(T_rep >= T_obs)` counts a tie as a disagreement, pinning
-  a statistic the model reproduces exactly at 1.0 instead of 0.5: a benchmark
-  with no scores above 0.95 has `T_obs = 0` for `frac_above_0.95`, and
-  `P(T_rep >= 0) = 1` however the model behaves.
-- **Consider per-benchmark spread checks (sd, variance, IQR) alongside pooled.**
-  Pooled across benchmarks they measure the spread of the fitted curve, which
-  partial pooling deliberately shrinks, so the pooled p-value runs low even
-  for a model that is right.
 
 `evaluate=True` keeps the pointwise log likelihood and draws a replicated
 dataset per posterior draw, both of which are (draws × observations) arrays,
