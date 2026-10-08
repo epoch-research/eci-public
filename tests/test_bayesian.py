@@ -80,7 +80,7 @@ class TestModelConstruction:
 
     def test_coords_are_names(self, truth):
         """Coordinates carry model and benchmark names, not positional ids,
-        in first-appearance order as in the least-squares fit."""
+        in first-appearance order."""
         df = truth["df"]
         model = build_bayesian_model(df)
         assert list(model.coords["model"]) == df["Model"].drop_duplicates().tolist()
@@ -177,7 +177,7 @@ class TestIdentifyingConstraints:
 
 
 class TestOutputFormat:
-    """Tests for the returned frames, which mirror the least-squares fit."""
+    """Tests for the returned frames."""
 
     def test_eci_columns_and_sorting(self, fitted):
         eci_df, _, _ = fitted
