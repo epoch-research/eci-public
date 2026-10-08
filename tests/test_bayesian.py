@@ -142,6 +142,24 @@ class TestModelConstruction:
         assert (kappa > 0).all()
         np.testing.assert_allclose(0.5 / np.sqrt(kappa + 1.0), sigma)
 
+    def test_tau_is_the_marginal_sd(self, truth):
+        """tau_cd and tau_alpha are the marginal SDs of capability, difficulty
+        and log slope alike. Without the zero-sum correction the two zero-sum
+        priors would come out sqrt(1 - 1/K) narrower, 1.7% at K = 30."""
+        model = pm.do(build_bayesian_model(truth["df"]), {"tau_cd": 2.0, "tau_alpha": 0.5})
+        capability, difficulty, log_slope = pm.draw(
+            [model["capability"], model["difficulty"], model["log_slope"]],
+            draws=20000, random_seed=0,
+        )
+        assert np.sqrt((capability**2).mean()) == pytest.approx(2.0, rel=0.005)
+        assert np.sqrt((difficulty**2).mean()) == pytest.approx(2.0, rel=0.005)
+        assert np.sqrt((log_slope**2).mean()) == pytest.approx(0.5, rel=0.005)
+
+    def test_rejects_a_single_benchmark(self, truth):
+        df = truth["df"]
+        with pytest.raises(ValueError, match="two benchmarks"):
+            build_bayesian_model(df[df["benchmark_id"] == df["benchmark_id"].iloc[0]])
+
 
 class TestIdentifyingConstraints:
     """The two constraints that pin down the otherwise free location and

@@ -167,7 +167,9 @@ The priors are weakly informative:
 | `sigma_median` | `LogNormal(ln 0.1, 0.5)` | the typical benchmark's noise SD |
 | `tau_sigma` | `LogNormal(ln 0.5, 0.5)` | spread of `ln sigma_b` across benchmarks |
 
-Those two sum-to-zero constraints are what identify the fit on the raw scale. The noise prior
+Those two sum-to-zero constraints are what identify the fit on the raw scale.
+We apply a `sqrt(K / (K - 1))` correction term to the zero-sum priors' scale, where `K` is the
+number of benchmarks, so that `tau_cd` and `tau_alpha` are the marginal SDs. The noise prior
 is hierarchical: the benchmarks share a typical noise level, learned from all
 of them, so one with only a handful of scores is pulled towards it rather than
 towards a fixed guess.

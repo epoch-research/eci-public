@@ -165,6 +165,8 @@ def build_bayesian_model(
         (not the positional ids, which shift whenever the input data change).
     """
     _, model_names, _, bench_names, model_idx, bench_idx = _index_data(df)
+    if len(bench_names) < 2:
+        raise ValueError("the fit needs at least two benchmarks")
     performance = _prepare_performance(df, performance_clip_eps)
 
     coords = {"model": model_names, "benchmark": bench_names}
@@ -184,9 +186,17 @@ def build_bayesian_model(
         )
         kappa = pm.Deterministic("kappa", 1.0 / (4.0 * sigma**2) - 1.0, dims="benchmark")
 
+        # A sum-to-zero vector of length K has marginal SD sigma * sqrt(1 - 1/K);
+        # scaling sigma up by sqrt(K / (K - 1)) makes tau_cd and tau_alpha the
+        # marginal SDs.
+        zero_sum_scale = np.sqrt(len(bench_names) / (len(bench_names) - 1))
         capability = pm.Normal("capability", 0.0, tau_cd, dims="model")
-        difficulty = pm.ZeroSumNormal("difficulty", sigma=tau_cd, dims="benchmark")
-        log_slope = pm.ZeroSumNormal("log_slope", sigma=tau_alpha, dims="benchmark")
+        difficulty = pm.ZeroSumNormal(
+            "difficulty", sigma=tau_cd * zero_sum_scale, dims="benchmark"
+        )
+        log_slope = pm.ZeroSumNormal(
+            "log_slope", sigma=tau_alpha * zero_sum_scale, dims="benchmark"
+        )
         slope = pm.Deterministic("slope", pm.math.exp(log_slope), dims="benchmark")
 
         eta = slope[bench_idx] * (capability[model_idx] - difficulty[bench_idx])
