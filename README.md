@@ -239,24 +239,29 @@ warnings, not errors, so the draws are still returned for inspection.
 
 ### Least-squares fit (deprecated)
 
-Deprecated/historical: this predates the Bayesian fit above, which is now
-the default. It's kept for reference and for reproducing old results.
+Kept for reference and for reproducing old results.
 
-`fit_eci_model` fits the same IRT curve by least squares. It is identified
-differently: the anchor benchmark's discriminability is pinned to fix the
-multiplicative scale and an L2 penalty resolves the remaining translation
-freedom, where the Bayesian fit uses its two sum-to-zero constraints. Its
-intervals come from a bootstrap rather than a posterior. It is the faster 
-of the two and needs no MCMC diagnostics, but it reports no `sigma`, has 
-no per-observation noise model, and there is no diagnostic suite for it. 
-`edi_df` carries an `is_anchor` column marking the pinned benchmark.
+`fit_eci_model` fits the capabilities, difficulties and discriminabilities
+that minimise the squared error between the IRT curve and the observed scores, 
+plus an L2 penalty on all parameters. Scores are clipped by 
+`performance_clip_eps` (default `[0.001,0.999]), and the
+penalty's weight is set by `regularization_strength` (default `0.1`). It's 
+solved with SciPy's bounded `least_squares`, keeping capabilities and difficulties 
+in `[-10, 10]` and discriminabilities in `[0.1, 10]`.
 
-Bootstrap resampling holds the set of models fixed and resamples each
-model's benchmark results with replacement. 
+The curve only depends on `discriminability * (capability - difficulty)`, so
+the parameters need to be anchored. The discriminability of the `anchor_benchmark`
+(Winogrande by default) is fixed at `anchor_discriminability`
+(default `1.0`), which sets the scale, and the L2 penalty sets the location.
+`edi_df` marks the anchor benchmark in its `is_anchor` column. These choices
+set the raw scale the model is fit on; the fitted values are then
+mapped linearly onto the ECI scale so that the two anchor models sit at 130
+and 150.
 
-The anchor model names are matched against the `Model` column of the input
-data; renaming those models upstream requires passing the new names
-explicitly (the fit fails if an anchor is missing).
+Intervals come from a bootstrap of `bootstrap_samples` resamples (default 500, 
+seeded by `bootstrap_seed`). The intervals cover the central `ci_level` of 
+those refits (default `0.90`, i.e. the 5th and 95th percentiles).
+
 
 ## Running Tests
 
