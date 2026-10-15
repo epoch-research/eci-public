@@ -15,7 +15,15 @@ pytest.importorskip("pymc", reason="PyMC is required; reinstall with pip install
 import pymc as pm  # noqa: E402
 import pytensor.tensor as pt  # noqa: E402
 
-from eci.bayesian import BayesianPriors, build_bayesian_model, fit_bayesian_eci  # noqa: E402
+from eci import bayesian  # noqa: E402
+from eci.bayesian import (  # noqa: E402
+    BayesianPriors,
+    WarmStart,
+    _aligned_draws,
+    _donors,
+    build_bayesian_model,
+    fit_bayesian_eci,
+)
 
 ANCHOR_LOW, ANCHOR_HIGH = "Claude 3.5 Sonnet", "GPT-5"
 N_MODELS, N_BENCHMARKS = 40, 30
@@ -304,3 +312,76 @@ class TestAnchorHandling:
         )
         anchors = eci_df.set_index("Model").loc[[ANCHOR_LOW, ANCHOR_HIGH], "eci"]
         assert anchors.to_numpy() == pytest.approx([0.0, 100.0], abs=1e-9)
+
+
+def _without(warm, model=None, benchmark=None):
+    """The warm start as a previous fit that never saw ``model`` or ``benchmark``."""
+    keep_m = [i for i, m in enumerate(warm.models) if m != model]
+    keep_b = [i for i, b in enumerate(warm.benchmarks) if b != benchmark]
+    draws = {}
+    for v, x in warm.draws.items():
+        if v == "capability":
+            x = x[:, keep_m]
+        elif x.ndim == 2:
+            x = x[:, keep_b]
+        draws[v] = x
+    return WarmStart(draws, tuple(warm.models[i] for i in keep_m),
+                     tuple(warm.benchmarks[i] for i in keep_b))
+
+
+class TestWarmStart:
+    """Sampling with a dense mass matrix, from a warm start or a pilot run."""
+
+    def test_default_fit_uses_a_pilot(self, fitted):
+        assert fitted[2]["started_from"] == "pilot"
+
+    def test_round_trips_through_a_file(self, fitted, tmp_path):
+        warm = fitted[2]["warm_start"]
+        loaded = WarmStart.load(warm.save(tmp_path / "warm.npz"))
+        assert loaded.models == warm.models and loaded.benchmarks == warm.benchmarks
+        for v, x in warm.draws.items():
+            # Saved as float32 to keep the file small.
+            np.testing.assert_allclose(loaded.draws[v], x, rtol=1e-6, atol=1e-6)
+
+    def test_donor_is_the_most_similar_benchmark_set(self):
+        df = pd.DataFrame({
+            "Model": ["new"] * 3 + ["near"] * 3 + ["far"] * 2,
+            "benchmark": ["a", "b", "c", "a", "b", "d", "e", "f"],
+        })
+        assert _donors(df, ["near", "far"], "model") == {"new": "near"}
+
+    def test_new_items_borrow_their_donors_spread(self, truth, fitted):
+        """A model and a benchmark the warm start lacks take shuffled copies of
+        their donors' draws, and zero-sum variables stay centred."""
+        new_model, new_bench = truth["names"][5], truth["bench_names"][7]
+        reduced = _without(fitted[2]["warm_start"], new_model, new_bench)
+        model = build_bayesian_model(truth["df"])
+        aligned = _aligned_draws(reduced, model, truth["df"], np.random.default_rng(0))
+
+        donor = _donors(truth["df"], reduced.models, "model")[new_model]
+        filled = aligned["capability"][:, list(model.coords["model"]).index(new_model)]
+        source = reduced.draws["capability"][:, reduced.models.index(donor)]
+        np.testing.assert_allclose(np.sort(filled), np.sort(source))
+        np.testing.assert_allclose(aligned["difficulty"].sum(axis=1), 0, atol=1e-9)
+        assert aligned["sigma"].shape[1] == N_BENCHMARKS
+
+    def test_warm_started_refit_matches(self, truth, fitted):
+        """A refit warm-started from a previous fit that lacked one model lands
+        where the pilot-started fit did."""
+        reduced = _without(fitted[2]["warm_start"], model=truth["names"][5])
+        eci_df, _, draws = fit_bayesian_eci(truth["df"], warm_start=reduced, **SAMPLING)
+        assert draws["started_from"] == "warm"
+        warm = eci_df.set_index("Model")["eci"]
+        pilot = fitted[0].set_index("Model")["eci"][warm.index]
+        assert spearmanr(warm, pilot)[0] > 0.99
+        assert (warm - pilot).abs().max() < 2.0
+
+    def test_unconverged_warm_start_falls_back_to_a_pilot(self, truth, fitted, monkeypatch):
+        monkeypatch.setattr(bayesian, "_MIN_ESS", 10**9)
+        with pytest.warns(UserWarning, match="refitting with a pilot run"):
+            _, _, draws = fit_bayesian_eci(truth["df"], warm_start=fitted[2]["warm_start"], **SAMPLING)
+        assert draws["started_from"] == "pilot"
+
+    def test_cold_fit_is_still_available(self, truth):
+        _, _, draws = fit_bayesian_eci(truth["df"], dense_mass_matrix=False, **SAMPLING)
+        assert draws["started_from"] == "cold"

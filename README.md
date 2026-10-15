@@ -184,8 +184,36 @@ priors = BayesianPriors(sigma_median=(np.log(0.07), 0.5))
 eci_df, edi_df, draws = fit_bayesian_eci(df, priors=priors)
 ```
 
-The sampler runs a default 4 chains of 2000 tuning steps and 4000 draws at
-`target_accept=0.95`.
+### Sampling
+
+The sampler runs 4 chains, each on its own core, of 4000 draws at
+`target_accept=0.95`, with a dense mass matrix: the covariance of every
+parameter, estimated from earlier posterior draws. Capabilities, difficulties
+and slopes are strongly correlated, and the dense matrix lets each draw take
+far fewer steps than PyMC's default diagonal one.
+
+The covariance comes from a warm start or, without one, from a pilot run:
+
+- **Warm start**: every fit returns `draws["warm_start"]`, a thinned copy of
+  its posterior (a few MB once saved). Pass it, or the file it was saved to,
+  to the next fit. Models and benchmarks it lacks borrow the spread of the
+  most similar existing one (by overlap of benchmarks, or of models). Each
+  chain starts from a different previous draw, so r_hat stays meaningful.
+  Tuning is 500 steps.
+- **Pilot**: a short run (1000 tuning steps and 1000 draws per chain) with the
+  default diagonal mass matrix, used only to estimate the covariance.
+
+```python
+eci_df, edi_df, draws = fit_bayesian_eci(df)                  # pilot
+draws["warm_start"].save("warm_start.npz")
+eci_df, edi_df, draws = fit_bayesian_eci(df, warm_start="warm_start.npz")
+print(draws["started_from"])                                   # "warm"
+```
+
+If a warm-started fit misses the convergence checks (bulk ESS below 400 or
+r_hat above 1.01), it is redone with a pilot run, with a warning.
+`dense_mass_matrix=False` restores PyMC's default sampler (2000 tuning steps),
+which needs about three times the draws for the same effective sample size.
 
 
 ### Evaluating a fit

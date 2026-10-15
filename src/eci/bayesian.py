@@ -5,26 +5,35 @@ Implements the IRT curve as the mean of a per-observation Beta
 likelihood sampled by MCMC. See the README's "Bayesian fit" section 
 for the model, the priors, and how results are mapped onto the ECI scale.
 
-Besides the priors dataclass, two public entry points build and fit the model:
-:func:`build_bayesian_model` assembles the plain ``pm.Model`` (coordinates,
-priors, likelihood) without touching the sampler, so it can be inspected or
-sampled by hand; :func:`fit_bayesian_eci` calls it, runs ``pm.sample``, and
-does everything downstream of the raw posterior - convergence warnings,
-rescaling each draw onto the ECI scale via the anchor models, and (with
-``evaluate=True``) handing the trace to :mod:`eci.evaluation`. Everything
-else here is a private helper behind one of those two: pulling equal-tailed
-intervals out of an array, indexing the input data, and the per-draw anchor
-transform.
+Besides the priors and warm-start dataclasses, two public entry points build
+and fit the model: :func:`build_bayesian_model` assembles the plain
+``pm.Model`` (coordinates, priors, likelihood) without touching the sampler, so
+it can be inspected or sampled by hand; :func:`fit_bayesian_eci` calls it, runs
+``pm.sample``, and does everything downstream of the raw posterior - convergence
+warnings, rescaling each draw onto the ECI scale via the anchor models, and
+(with ``evaluate=True``) handing the trace to :mod:`eci.evaluation`.
+
+The fit samples with a dense mass matrix: the covariance of every parameter,
+estimated from earlier posterior draws. Capabilities, difficulties and slopes
+are strongly correlated (a model can sit further below a benchmark if that
+benchmark's slope is shallower), and the default diagonal mass matrix cannot
+see that, which forces many small steps per draw. The draws come from a
+:class:`WarmStart` (a previous fit's thinned posterior) or, without one, from a
+short pilot run. Everything else here is a private helper behind the public
+entry points.
 """
 
 import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import arviz as az
 import numpy as np
 import pandas as pd
 import pymc as pm
+import pytensor.tensor as pt
 from pymc.distributions.transforms import ZeroSumTransform
+from pymc.step_methods.hmc.quadpotential import QuadPotentialFull
 
 from .evaluation import evaluate_fit
 from .fitting import (
@@ -52,6 +61,19 @@ _DIAGNOSTIC_VARS = [
     "capability", "difficulty", "slope", "sigma",
     "tau_alpha", "sigma_median", "tau_sigma",
 ]
+
+# The free variables a warm start carries over, and which of them sum to zero.
+_WARM_VARS = ("tau_alpha", "sigma_median", "tau_sigma", "sigma", "capability", "difficulty", "log_slope")
+_ZERO_SUM_VARS = ("difficulty", "log_slope")
+# Posterior draws a warm start keeps: enough to estimate the covariance of the
+# ~460 unconstrained parameters, few enough for a file of a few MB.
+_WARM_DRAWS = 2000
+# Weight on the diagonal when shrinking the estimated covariance, which keeps it
+# well conditioned however few draws it came from.
+_COV_SHRINKAGE = 0.1
+# A warm-started fit below this bulk ESS (or above the r_hat limit) is redone
+# with a pilot run.
+_MIN_ESS = 400
 
 
 @dataclass(frozen=True)
@@ -87,6 +109,51 @@ class BayesianPriors:
     tau_alpha: tuple[float, float] = field(default=(float(np.log(0.5)), 0.5))
     sigma_median: tuple[float, float] = field(default=(float(np.log(0.1)), 0.5))
     tau_sigma: tuple[float, float] = field(default=(float(np.log(0.5)), 0.5))
+
+
+@dataclass(frozen=True)
+class WarmStart:
+    """
+    A thinned set of a fit's posterior draws, for starting the next fit.
+
+    ``draws`` maps each free variable (``_WARM_VARS``) to an array of shape
+    (n_draws,) or (n_draws, n_items), with items in the order of ``models`` or
+    ``benchmarks``. Draws are on the constrained scale and keyed by name, so a
+    later fit on changed data can reuse them: it matches models and benchmarks
+    by name and fills in the ones this fit did not have.
+
+    Every fit returns one as ``draws["warm_start"]``; save it with
+    :meth:`save` and pass the file to the next fit's ``warm_start``.
+    """
+
+    draws: dict
+    models: tuple
+    benchmarks: tuple
+
+    @classmethod
+    def from_trace(cls, trace: az.InferenceData, n_draws: int = _WARM_DRAWS) -> "WarmStart":
+        posterior = trace.posterior
+        total = posterior.sizes["chain"] * posterior.sizes["draw"]
+        keep = np.linspace(0, total - 1, min(n_draws, total)).astype(int)
+        draws = {
+            v: posterior[v].stack(sample=("chain", "draw")).transpose("sample", ...).to_numpy()[keep]
+            for v in _WARM_VARS
+        }
+        return cls(draws, tuple(posterior.coords["model"].values), tuple(posterior.coords["benchmark"].values))
+
+    def save(self, path: "str | Path") -> Path:
+        path = Path(path)
+        np.savez_compressed(
+            path, models=np.array(self.models), benchmarks=np.array(self.benchmarks),
+            **{v: x.astype(np.float32) for v, x in self.draws.items()},
+        )
+        return path
+
+    @classmethod
+    def load(cls, path: "str | Path") -> "WarmStart":
+        with np.load(Path(path), allow_pickle=False) as f:
+            return cls({v: f[v].astype(float) for v in _WARM_VARS},
+                       tuple(f["models"].tolist()), tuple(f["benchmarks"].tolist()))
 
 
 def _interval(values: np.ndarray, prob: float) -> tuple[np.ndarray, np.ndarray]:
@@ -283,16 +350,153 @@ def _anchor_transform(
     return eci_low - b * low, b
 
 
+def _donors(df: pd.DataFrame, known, dim: str) -> dict:
+    """For each model (dim="model") or benchmark not in ``known``, the known one
+    whose set of benchmarks (or models) overlaps most with its own (Jaccard),
+    ties broken by the closer set size."""
+    by, of = ("Model", "benchmark") if dim == "model" else ("benchmark", "Model")
+    sets = df.groupby(by)[of].apply(set)
+    known = [k for k in known if k in sets.index]
+    out = {}
+    for item in sets.index.difference(known):
+        out[item] = max(known, key=lambda k: (
+            len(sets[item] & sets[k]) / len(sets[item] | sets[k]),
+            -abs(len(sets[item]) - len(sets[k])),
+        ))
+    return out
+
+
+def _aligned_draws(warm: WarmStart, model: pm.Model, df: pd.DataFrame, rng) -> dict:
+    """The warm start's draws, aligned by name to this model's coordinates.
+
+    A model or benchmark the warm start lacks takes a shuffled copy of its
+    donor's draws (see :func:`_donors`): the donor's spread, and its bounds for
+    sigma, without its correlation with everything else. A donor-free fill
+    would mis-scale the mass matrix and shrink the step size. Zero-sum
+    variables are re-centred afterwards.
+    """
+    names = {"model": list(warm.models), "benchmark": list(warm.benchmarks)}
+    out = {}
+    for v in _WARM_VARS:
+        x = warm.draws[v]
+        if x.ndim == 1:
+            out[v] = x
+            continue
+        dim = "model" if v == "capability" else "benchmark"
+        index = {name: j for j, name in enumerate(names[dim])}
+        donor = _donors(df, index, dim)
+        block = np.empty((x.shape[0], len(model.coords[dim])))
+        for j, name in enumerate(model.coords[dim]):
+            source = index[name] if name in index else index[donor[name]]
+            block[:, j] = x[:, source] if name in index else rng.permutation(x[:, source])
+        if v in _ZERO_SUM_VARS:
+            block -= block.mean(axis=1, keepdims=True)
+        out[v] = block
+    return out
+
+
+def _dense_step(model: pm.Model, aligned: dict, target_accept: float) -> pm.NUTS:
+    """NUTS whose mass matrix is the (shrunk) covariance of the aligned draws on
+    the sampler's unconstrained scale."""
+    columns = []
+    for value in model.value_vars:
+        rv = model.values_to_rvs[value]
+        transform = model.rvs_to_transforms[rv]
+        x = aligned[rv.name]
+        if transform is not None:
+            x = transform.forward(pt.as_tensor(x), *rv.owner.inputs).eval()
+        columns.append(np.asarray(x).reshape(len(x), -1))
+    cov = np.cov(np.hstack(columns), rowvar=False)
+    cov = (1 - _COV_SHRINKAGE) * cov + _COV_SHRINKAGE * np.diag(np.diag(cov))
+    with model:
+        return pm.NUTS(potential=QuadPotentialFull(cov), target_accept=target_accept)
+
+
+def _chain_starts(aligned: dict, chains: int, rng) -> list[dict]:
+    """A different aligned draw per chain, so r_hat still compares chains that
+    started in different places."""
+    picks = rng.choice(len(aligned["capability"]), chains, replace=False)
+    return [{v: aligned[v][i] for v in _WARM_VARS} for i in picks]
+
+
+def _converged(trace: az.InferenceData, max_rhat: float = 1.01) -> bool:
+    rhat = az.rhat(trace, var_names=_DIAGNOSTIC_VARS)
+    ess = az.ess(trace, var_names=_DIAGNOSTIC_VARS)
+    worst_rhat = max(float(np.nanmax(v.to_numpy())) for v in rhat.data_vars.values())
+    lowest_ess = min(float(np.nanmin(v.to_numpy())) for v in ess.data_vars.values())
+    return worst_rhat <= max_rhat and lowest_ess >= _MIN_ESS
+
+
+def _sample(
+    model: pm.Model,
+    df: pd.DataFrame,
+    *,
+    draws: int,
+    tune: "int | None",
+    chains: int,
+    target_accept: float,
+    random_seed: int,
+    progressbar: bool,
+    warm_start: "WarmStart | str | Path | None",
+    dense_mass_matrix: bool,
+    pilot_tune: int,
+    pilot_draws: int,
+    sample_kwargs: dict,
+) -> tuple[az.InferenceData, str]:
+    """Sample the model; returns the trace and how it was started ("warm",
+    "pilot" or "cold")."""
+    common = dict(chains=chains, cores=chains, random_seed=random_seed, progressbar=progressbar,
+                  **sample_kwargs)
+    if not dense_mass_matrix:
+        with model:
+            trace = pm.sample(draws=draws, tune=2000 if tune is None else tune,
+                              target_accept=target_accept, **common)
+        return trace, "cold"
+
+    rng = np.random.default_rng(random_seed)
+    tune = 500 if tune is None else tune
+
+    def dense_fit(warm):
+        aligned = _aligned_draws(warm, model, df, rng)
+        step = _dense_step(model, aligned, target_accept)
+        with model:
+            return pm.sample(draws=draws, tune=tune, step=step,
+                             initvals=_chain_starts(aligned, chains, rng), **common)
+
+    if isinstance(warm_start, (str, Path)):
+        warm_start = WarmStart.load(warm_start)
+    if warm_start is not None:
+        trace = dense_fit(warm_start)
+        if _converged(trace):
+            return trace, "warm"
+        warnings.warn(
+            "The warm-started fit did not converge (bulk ESS or r_hat out of range); "
+            "refitting with a pilot run.",
+            stacklevel=3,
+        )
+    # Pilot: a short run with the default diagonal mass matrix, only to
+    # estimate the covariance and starting points for the dense run.
+    with model:
+        pilot = pm.sample(draws=pilot_draws, tune=pilot_tune, target_accept=target_accept,
+                          compute_convergence_checks=False,
+                          **{**common, "random_seed": random_seed + 1})
+    return dense_fit(WarmStart.from_trace(pilot)), "pilot"
+
+
 def fit_bayesian_eci(
     df: pd.DataFrame,
     priors: BayesianPriors = BayesianPriors(),
     performance_clip_eps: float = 1e-3,
     draws: int = 4000,
-    tune: int = 2000,
+    tune: "int | None" = None,
     chains: int = 4,
     target_accept: float = 0.95,
     random_seed: int = 12345,
     *,
+    warm_start: "WarmStart | str | Path | None" = None,
+    dense_mass_matrix: bool = True,
+    pilot_tune: int = 1000,
+    pilot_draws: int = 1000,
     anchor_model_low: str = DEFAULT_ANCHOR_MODEL_LOW,
     anchor_eci_low: float = DEFAULT_ANCHOR_ECI_LOW,
     anchor_model_high: str = DEFAULT_ANCHOR_MODEL_HIGH,
@@ -313,10 +517,22 @@ def fit_bayesian_eci(
         priors: hyperpriors; see :class:`BayesianPriors`.
         performance_clip_eps: clip performance into [eps, 1 - eps].
         draws: posterior draws kept per chain.
-        tune: tuning (warm-up) steps per chain, discarded.
-        chains: number of chains, run in parallel where cores allow.
+        tune: tuning (warm-up) steps per chain, discarded. Defaults to 500
+            with the dense mass matrix and 2000 without it.
+        chains: number of chains, each on its own core.
         target_accept: NUTS target acceptance rate.
         random_seed: seed for the sampler.
+        warm_start: a previous fit's :class:`WarmStart` (or the path it was
+            saved to). Its draws give the dense mass matrix and each chain's
+            starting point; models and benchmarks it lacks borrow a donor's
+            spread. If the warm-started fit misses the convergence checks
+            (bulk ESS below 400 or r_hat above 1.01), it is redone with a
+            pilot run, with a warning.
+        dense_mass_matrix: sample with a dense mass matrix, from
+            ``warm_start`` or, without one, from a pilot run. False samples
+            with PyMC's default diagonal adaptation, which needs about three
+            times the draws for the same effective sample size here.
+        pilot_tune / pilot_draws: size of the pilot run, per chain.
         anchor_model_low / anchor_eci_low / anchor_model_high /
             anchor_eci_high: the models that define the ECI scale and their
             fixed values.
@@ -347,8 +563,9 @@ def fit_bayesian_eci(
           benchmark_names, the (n_draws, n) arrays eci, edi, slope and
           sigma,
           the per-draw map coefficients a and b, trace, the full
-          ``arviz.InferenceData``, and - with evaluate=True - evaluation,
-          the dict of diagnostic tables.
+          ``arviz.InferenceData``, warm_start (a :class:`WarmStart` for
+          the next fit), started_from ("warm", "pilot" or "cold"), and -
+          with evaluate=True - evaluation, the dict of diagnostic tables.
 
     Divergences and poor mixing are warned about, not raised; a fit whose
     anchor capabilities coincide or invert in any draw raises, since no scale
@@ -364,16 +581,14 @@ def fit_bayesian_eci(
     sample_kwargs = dict(sampler_kwargs or {})
 
     pymc_model = build_bayesian_model(df, priors, performance_clip_eps)
+    trace, started_from = _sample(
+        pymc_model, df,
+        draws=draws, tune=tune, chains=chains, target_accept=target_accept,
+        random_seed=random_seed, progressbar=progressbar, warm_start=warm_start,
+        dense_mass_matrix=dense_mass_matrix, pilot_tune=pilot_tune,
+        pilot_draws=pilot_draws, sample_kwargs=sample_kwargs,
+    )
     with pymc_model:
-        trace = pm.sample(
-            draws=draws,
-            tune=tune,
-            chains=chains,
-            target_accept=target_accept,
-            random_seed=random_seed,
-            progressbar=progressbar,
-            **sample_kwargs,
-        )
         if evaluate:
             # LOO needs the pointwise log likelihood, which PyMC does not
             # keep by default because it is one number per draw per
@@ -416,6 +631,8 @@ def fit_bayesian_eci(
         "a": a,
         "b": b,
         "trace": trace,
+        "warm_start": WarmStart.from_trace(trace),
+        "started_from": started_from,
     }
     if evaluate:
         draws_out["evaluation"] = evaluate_fit(
