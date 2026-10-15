@@ -33,7 +33,7 @@ from scipy import stats
 # so its r_hat and ESS say nothing extra.
 REPORTED_VARS = (
     "capability", "difficulty", "slope", "sigma",
-    "tau_cd", "tau_alpha", "sigma_median", "tau_sigma",
+    "tau_alpha", "sigma_median", "tau_sigma",
 )
 
 # Coverage levels reported by the calibration check.

@@ -158,22 +158,23 @@ The priors are weakly informative:
 
 | Parameter | Prior | Notes |
 | --- | --- | --- |
-| `C_m` (capability) | `Normal(0, tau_cd)` | |
-| `D_b` (difficulty) | `ZeroSumNormal(tau_cd)` | `sum_b D_b = 0` fixes the location |
+| `C_m` (capability) | `Uniform(-50, 50)` | flat over any plausible range |
+| `D_b` (difficulty) | uniform on `[-50, 50]^K` with `sum_b D_b = 0` | the sum fixes the location |
 | `alpha_b` (slope) | `exp(ZeroSumNormal(tau_alpha))` | `prod_b alpha_b = 1` fixes the scale |
-| `tau_cd` | `LogNormal(ln 3, 0.5)` | shared scale of capability and difficulty |
 | `tau_alpha` | `LogNormal(ln 0.5, 0.5)` | |
 | `sigma_b` | `LogNormal(ln sigma_median, tau_sigma)` truncated to `(0, 0.5)` | per-benchmark noise SD at `mu = 0.5` |
 | `sigma_median` | `LogNormal(ln 0.1, 0.5)` | the typical benchmark's noise SD |
 | `tau_sigma` | `LogNormal(ln 0.5, 0.5)` | spread of `ln sigma_b` across benchmarks |
 
 Those two sum-to-zero constraints are what identify the fit on the raw scale.
-We apply a `sqrt(K / (K - 1))` correction term to the zero-sum priors' scale, where `K` is the
-number of benchmarks, so that `tau_cd` and `tau_alpha` are the marginal SDs. The noise prior
+We apply a `sqrt(K / (K - 1))` correction term to the log slopes' zero-sum prior scale, where
+`K` is the number of benchmarks, so that `tau_alpha` is the marginal SD. The uniform difficulty
+prior gets no such correction: the sum-to-zero constraint leaves each difficulty's marginal SD
+about 1% narrower than a capability's for `K` around 20, which a prior this wide does not notice. The noise prior
 is hierarchical: the benchmarks share a typical noise level, learned from all
 of them, so one with only a handful of scores is pulled towards it rather than
 towards a fixed guess.
-The four hyperpriors are customisable, each given as the
+The three hyperpriors are customisable, each given as the
 `(mu, sigma)` of the underlying normal:
 
 ```python

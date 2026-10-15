@@ -13,6 +13,7 @@ from scipy.stats import spearmanr
 pytest.importorskip("pymc", reason="PyMC is required; reinstall with pip install -e .")
 
 import pymc as pm  # noqa: E402
+import pytensor.tensor as pt  # noqa: E402
 
 from eci.bayesian import BayesianPriors, build_bayesian_model, fit_bayesian_eci  # noqa: E402
 
@@ -92,7 +93,7 @@ class TestModelConstruction:
         names = {v.name for v in model.named_vars.values()}
         assert {
             "capability", "difficulty", "slope", "sigma", "kappa",
-            "tau_cd", "tau_alpha", "sigma_median", "tau_sigma",
+            "tau_alpha", "sigma_median", "tau_sigma",
         } <= names
 
     def test_rejects_nan_performance(self, truth):
@@ -142,18 +143,35 @@ class TestModelConstruction:
         assert (kappa > 0).all()
         np.testing.assert_allclose(0.5 / np.sqrt(kappa + 1.0), sigma)
 
-    def test_tau_is_the_marginal_sd(self, truth):
-        """tau_cd and tau_alpha are the marginal SDs of capability, difficulty
-        and log slope alike. Without the zero-sum correction the two zero-sum
-        priors would come out sqrt(1 - 1/K) narrower, 1.7% at K = 30."""
-        model = pm.do(build_bayesian_model(truth["df"]), {"tau_cd": 2.0, "tau_alpha": 0.5})
-        capability, difficulty, log_slope = pm.draw(
-            [model["capability"], model["difficulty"], model["log_slope"]],
-            draws=20000, random_seed=0,
-        )
-        assert np.sqrt((capability**2).mean()) == pytest.approx(2.0, rel=0.005)
-        assert np.sqrt((difficulty**2).mean()) == pytest.approx(2.0, rel=0.005)
+    def test_tau_alpha_is_the_marginal_sd(self, truth):
+        """tau_alpha is the marginal SD of the log slopes. Without the zero-sum
+        correction it would come out sqrt(1 - 1/K) narrower, 1.7% at K = 30."""
+        model = pm.do(build_bayesian_model(truth["df"]), {"tau_alpha": 0.5})
+        log_slope = pm.draw(model["log_slope"], draws=20000, random_seed=0)
         assert np.sqrt((log_slope**2).mean()) == pytest.approx(0.5, rel=0.005)
+
+    def test_difficulty_prior_is_flat_inside_the_box(self, truth):
+        """The difficulty prior is constant on the sum-to-zero slice of
+        [-50, 50]^K and zero outside it, including when only the last
+        (derived) component leaves the box."""
+        model = build_bayesian_model(truth["df"])
+        logp = model.compile_fn(
+            model.logp(vars=[model["difficulty"], model["difficulty_bound"]]),
+            inputs=[model.rvs_to_values[model["difficulty"]]],
+        )
+        transform = model.rvs_to_transforms[model["difficulty"]]
+
+        def at(difficulty):
+            free = transform.forward(pt.as_tensor(np.asarray(difficulty, dtype=float))).eval()
+            return float(logp({"difficulty_zerosum__": free}))
+
+        n = len(model.coords["benchmark"])
+        inside = np.zeros(n)
+        inside[0], inside[-1] = 45.0, -45.0
+        assert at(np.zeros(n)) == at(inside) == 0.0
+        outside = np.full(n, 30.0)
+        outside[-1] = -30.0 * (n - 1)
+        assert at(outside) == -np.inf
 
     def test_rejects_a_single_benchmark(self, truth):
         df = truth["df"]

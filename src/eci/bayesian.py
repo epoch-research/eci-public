@@ -24,6 +24,7 @@ import arviz as az
 import numpy as np
 import pandas as pd
 import pymc as pm
+from pymc.distributions.transforms import ZeroSumTransform
 
 from .evaluation import evaluate_fit
 from .fitting import (
@@ -42,17 +43,21 @@ _MU_EPS = 1e-6
 # as kappa -> 0, so the per-benchmark SD must stay below it.
 _MAX_SIGMA = 0.5
 
+# Capabilities and difficulties are uniform on [-_CD_BOUND, _CD_BOUND], wide
+# enough to be flat wherever the data put them.
+_CD_BOUND = 50.0
+
 # Variables checked for convergence after sampling.
 _DIAGNOSTIC_VARS = [
     "capability", "difficulty", "slope", "sigma",
-    "tau_cd", "tau_alpha", "sigma_median", "tau_sigma",
+    "tau_alpha", "sigma_median", "tau_sigma",
 ]
 
 
 @dataclass(frozen=True)
 class BayesianPriors:
     """
-    The model's four hyperpriors, each a LogNormal given as
+    The model's three hyperpriors, each a LogNormal given as
     ``(mu, sigma)`` of the underlying normal.
 
     Defaults are the weakly informative ones described in the methodology.
@@ -67,8 +72,10 @@ class BayesianPriors:
     Beta cannot be wider, so benchmarks with few scores are pulled towards
     the noise level the others share rather than towards a fixed guess.
 
+    Capabilities and difficulties take flat priors (see
+    :func:`build_bayesian_model`), so they have no hyperprior here.
+
     Attributes:
-        tau_cd: shared scale of capabilities and difficulties.
         tau_alpha: scale of the log slopes.
         sigma_median: the typical benchmark's noise SD. The default centres
             it on 0.1 with 90% of the mass on roughly 0.04-0.23.
@@ -77,7 +84,6 @@ class BayesianPriors:
             another.
     """
 
-    tau_cd: tuple[float, float] = field(default=(float(np.log(3.0)), 0.5))
     tau_alpha: tuple[float, float] = field(default=(float(np.log(0.5)), 0.5))
     sigma_median: tuple[float, float] = field(default=(float(np.log(0.1)), 0.5))
     tau_sigma: tuple[float, float] = field(default=(float(np.log(0.5)), 0.5))
@@ -171,7 +177,6 @@ def build_bayesian_model(
 
     coords = {"model": model_names, "benchmark": bench_names}
     with pm.Model(coords=coords) as model:
-        tau_cd = _lognormal("tau_cd", priors.tau_cd)
         tau_alpha = _lognormal("tau_alpha", priors.tau_alpha)
         sigma_median = _lognormal("sigma_median", priors.sigma_median)
         tau_sigma = _lognormal("tau_sigma", priors.tau_sigma)
@@ -186,14 +191,26 @@ def build_bayesian_model(
         )
         kappa = pm.Deterministic("kappa", 1.0 / (4.0 * sigma**2) - 1.0, dims="benchmark")
 
-        # A sum-to-zero vector of length K has marginal SD sigma * sqrt(1 - 1/K);
-        # scaling sigma up by sqrt(K / (K - 1)) makes tau_cd and tau_alpha the
-        # marginal SDs.
-        zero_sum_scale = np.sqrt(len(bench_names) / (len(bench_names) - 1))
-        capability = pm.Normal("capability", 0.0, tau_cd, dims="model")
-        difficulty = pm.ZeroSumNormal(
-            "difficulty", sigma=tau_cd * zero_sum_scale, dims="benchmark"
+        capability = pm.Uniform(
+            "capability", -_CD_BOUND, _CD_BOUND, dims="model"
         )
+        # Uniform on the sum-to-zero slice of the box. PyMC has no zero-sum
+        # uniform, and Uniform with a ZeroSumTransform evaluates to nan, so the
+        # transform goes on a Flat and the box is imposed separately. The
+        # constraint narrows each difficulty's marginal SD slightly below the
+        # capabilities' (~1% at K = 20).
+        difficulty = pm.Flat(
+            "difficulty", dims="benchmark", transform=ZeroSumTransform([-1])
+        )
+        pm.Potential(
+            "difficulty_bound",
+            pm.math.switch(
+                pm.math.all(pm.math.abs(difficulty) <= _CD_BOUND), 0.0, -np.inf
+            ),
+        )
+        # A sum-to-zero vector of length K has marginal SD sigma * sqrt(1 - 1/K);
+        # scaling sigma up by sqrt(K / (K - 1)) makes tau_alpha the marginal SD.
+        zero_sum_scale = np.sqrt(len(bench_names) / (len(bench_names) - 1))
         log_slope = pm.ZeroSumNormal(
             "log_slope", sigma=tau_alpha * zero_sum_scale, dims="benchmark"
         )
