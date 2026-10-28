@@ -13,7 +13,7 @@ is deprecated/historical - kept for reference and reproducing old results,
 not for new work.
 """
 
-from .bayesian import BayesianPriors, WarmStart, build_bayesian_model, fit_bayesian_eci
+from .bayesian import BayesianPriors, build_bayesian_model, fit_bayesian_eci
 from .dataloader import (
     download_benchmark_data,
     load_benchmark_metadata,
@@ -35,6 +35,5 @@ __all__ = [
     "prepare_benchmark_data",
     "save_evaluation",
     "summarise_evaluation",
-    "WarmStart",
 ]
 __version__ = "0.2.0"
