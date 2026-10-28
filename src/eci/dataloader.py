@@ -179,10 +179,34 @@ def _load_scores(dfs: dict[str, pd.DataFrame], metadata: pd.DataFrame) -> pd.Dat
     return pd.concat(frames, ignore_index=True)
 
 
+def filter_mid_range_models(
+    scores: pd.DataFrame,
+    min_benchmarks: int,
+    score_range: tuple[float, float] = (0.1, 0.9),
+    model_col: str = "model",
+) -> pd.DataFrame:
+    """Keep the models with at least ``min_benchmarks`` distinct benchmarks
+    whose observed score lies in ``score_range`` (inclusive).
+
+    A benchmark's observed score is the model's best normalized score on it,
+    the value the fit sees. A qualifying model keeps all of its scores,
+    extreme ones included; this only drops models whose scores sit almost
+    entirely at the floor or the ceiling.
+    """
+    if min_benchmarks <= 0:
+        return scores
+    best = scores.groupby([model_col, "benchmark"])["performance"].max()
+    low, high = score_range
+    mid = best[(best >= low) & (best <= high)].groupby(level=model_col).size()
+    return scores[scores[model_col].isin(mid[mid >= min_benchmarks].index)]
+
+
 def prepare_benchmark_data(
     source: str | Path = BENCHMARK_DATA_URL,
     cache_dir: Optional[Path] = None,
     min_benchmarks_per_model: int = 4,
+    min_mid_range_benchmarks_per_model: int = 4,
+    mid_range: tuple[float, float] = (0.1, 0.9),
     min_date: str = "2023-01-01",
     include_benchmarks: Optional[set[str]] = None,
     exclude_benchmarks: Optional[set[str]] = None,
@@ -200,13 +224,18 @@ def prepare_benchmark_data(
     4. Drop rows dated before min_date
     5. Apply benchmark supersession (e.g. FrontierMath v2 replaces v1
        tier-for-tier where a group has both)
-    6. Filter models with too few benchmarks
+    6. Filter models with too few benchmarks (and optionally with too few
+       benchmarks scored inside mid_range)
     7. Aggregate by (model group, benchmark) taking max performance
 
     Args:
         source: URL or path of benchmark_data.zip
         cache_dir: Optional directory to cache downloaded files
         min_benchmarks_per_model: Minimum distinct benchmarks required per model
+        min_mid_range_benchmarks_per_model: Minimum distinct benchmarks whose
+            observed (normalized, clipped, best-version) score lies in
+            mid_range; qualifying models keep all their scores. 0 disables it.
+        mid_range: Inclusive (low, high) score range for the rule above.
         min_date: Rows dated before this are dropped
         include_benchmarks: If provided, only include these benchmarks (by name).
         exclude_benchmarks: If provided, exclude these benchmarks (by name).
@@ -335,6 +364,9 @@ def prepare_benchmark_data(
     counts = scores.groupby("model_group")["benchmark"].nunique()
     valid_models = counts[counts >= min_benchmarks_per_model].index
     scores = scores[scores["model_group"].isin(valid_models)]
+    scores = filter_mid_range_models(
+        scores, min_mid_range_benchmarks_per_model, mid_range, model_col="model_group"
+    )
 
     release_dates = metadata.set_index("benchmark")["release_date"]
     scores["benchmark_release_date"] = pd.to_datetime(scores["benchmark"].map(release_dates))

@@ -28,8 +28,9 @@ EDI_TOLERANCE = 0.1  # EDI points
 
 @pytest.fixture(scope="module")
 def benchmark_data():
-    """Prepare benchmark performance data from the published zip."""
-    return prepare_benchmark_data()
+    """Prepare benchmark performance data from the published zip, without the
+    mid-range rule, which the published scores predate."""
+    return prepare_benchmark_data(min_mid_range_benchmarks_per_model=0)
 
 
 @pytest.fixture(scope="module")

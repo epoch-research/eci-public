@@ -88,6 +88,9 @@ eci_df, edi_df, draws = fit_bayesian_eci(df)
 print(eci_df[["Model", "eci", "eci_ci_low", "eci_ci_high"]].head(10))
 ```
 
+`prepare_benchmark_data` drops models with fewer than 4 benchmarks scored in
+[0.1, 0.9] (`min_mid_range_benchmarks_per_model`; 0 turns it off).
+
 `fit_eci_model` is the least-squares fit and takes the same first argument,
 returning the same three objects:
 

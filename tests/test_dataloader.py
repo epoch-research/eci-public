@@ -76,6 +76,13 @@ SOURCE_FILES = {
 }
 
 
+def _prepare(source, **kwargs):
+    """prepare_benchmark_data on the synthetic zip, whose models have too few
+    scores for the mid-range rule, with that rule off by default."""
+    kwargs.setdefault("min_mid_range_benchmarks_per_model", 0)
+    return prepare_benchmark_data(source, **kwargs)
+
+
 @pytest.fixture(scope="module")
 def synthetic_zip(tmp_path_factory):
     path = tmp_path_factory.mktemp("data") / "benchmark_data.zip"
@@ -94,7 +101,7 @@ def synthetic_zip(tmp_path_factory):
 @pytest.fixture(scope="module")
 def loaded(synthetic_zip):
     with pytest.warns(UserWarning, match="Ghost"):
-        return prepare_benchmark_data(synthetic_zip, min_benchmarks_per_model=2)
+        return _prepare(synthetic_zip, min_benchmarks_per_model=2)
 
 
 def _row(df, model, benchmark):
@@ -152,7 +159,7 @@ class TestLoading:
         # 2022 version: only Old Bench and Gamma survive the date filter, so
         # at min 3 the model is excluded outright.
         with pytest.warns(UserWarning, match="Ghost"):
-            out = prepare_benchmark_data(synthetic_zip, min_benchmarks_per_model=3)
+            out = _prepare(synthetic_zip, min_benchmarks_per_model=3)
         assert "Mixed" not in set(out["model"])
 
     def test_date_filter_trims_old_rows(self, loaded):
@@ -176,8 +183,20 @@ class TestLoading:
         assert beta["benchmark_release_date"] == pd.Timestamp("2021-06-15")
 
     def test_min_benchmarks_per_model(self, synthetic_zip):
-        out = prepare_benchmark_data(synthetic_zip, min_benchmarks_per_model=3)
+        out = _prepare(synthetic_zip, min_benchmarks_per_model=3)
         assert "Group Two" not in set(out["model"])  # only Alpha + Beta
+
+    def test_min_mid_range_benchmarks_per_model(self, loaded, synthetic_zip):
+        best = loaded.groupby(["model", "benchmark"])["performance"].max()
+        mid = best[best.between(0.1, 0.9)].groupby(level="model").size()
+        out = _prepare(
+            synthetic_zip, min_benchmarks_per_model=2, min_mid_range_benchmarks_per_model=2
+        )
+        kept = set(mid[mid >= 2].index)
+        assert set(out["model"]) == kept
+        # Qualifying models keep their extreme scores too
+        for model in kept:
+            assert len(out[out["model"] == model]) == len(loaded[loaded["model"] == model])
 
 
 class TestExtraScores:
@@ -188,7 +207,7 @@ class TestExtraScores:
             "performance": [0.85, 45.0, 0.7],
             "source": ["staging"] * 3,
         })
-        out = prepare_benchmark_data(
+        out = _prepare(
             synthetic_zip, min_benchmarks_per_model=2, extra_scores=extra,
         )
         row = _row(out, "stage-v", "Alpha")
@@ -204,7 +223,7 @@ class TestExtraScores:
             "benchmark": ["Beta", "Gamma"],
             "performance": [45.0, 0.6],
         })
-        out = prepare_benchmark_data(
+        out = _prepare(
             synthetic_zip, min_benchmarks_per_model=2, extra_scores=extra,
         )
         rows = out[out["model"] == "No Date"]
@@ -218,7 +237,7 @@ class TestExtraScores:
             "performance": [0.9, 0.9],
         })
         with pytest.warns(UserWarning, match="Nope"):
-            out = prepare_benchmark_data(
+            out = _prepare(
                 synthetic_zip, min_benchmarks_per_model=1, extra_scores=extra,
             )
         assert "Nope" not in set(out["benchmark"])
@@ -236,14 +255,14 @@ class TestBenchmarkFiltering:
         assert "DisplayOnly" not in names
 
     def test_include_benchmarks(self, synthetic_zip):
-        out = prepare_benchmark_data(
+        out = _prepare(
             synthetic_zip, min_benchmarks_per_model=1,
             include_benchmarks={"Alpha", "Beta"},
         )
         assert set(out["benchmark"]) <= {"Alpha", "Beta"}
 
     def test_exclude_benchmarks(self, synthetic_zip):
-        out = prepare_benchmark_data(
+        out = _prepare(
             synthetic_zip, min_benchmarks_per_model=1,
             exclude_benchmarks={"Alpha"},
         )
@@ -251,16 +270,16 @@ class TestBenchmarkFiltering:
 
     def test_cannot_use_both_include_and_exclude(self, synthetic_zip):
         with pytest.raises(ValueError, match="Cannot specify both"):
-            prepare_benchmark_data(
+            _prepare(
                 synthetic_zip,
                 include_benchmarks={"Alpha"}, exclude_benchmarks={"Beta"},
             )
 
     def test_unknown_benchmark_raises(self, synthetic_zip):
         with pytest.raises(ValueError, match="Unknown benchmark names"):
-            prepare_benchmark_data(synthetic_zip, include_benchmarks={"Alpha", "Nonexistent"})
+            _prepare(synthetic_zip, include_benchmarks={"Alpha", "Nonexistent"})
         with pytest.raises(ValueError, match="Unknown benchmark names"):
-            prepare_benchmark_data(synthetic_zip, exclude_benchmarks={"Nonexistent"})
+            _prepare(synthetic_zip, exclude_benchmarks={"Nonexistent"})
 
 
 class TestMissingTables:
@@ -277,16 +296,16 @@ class TestMissingTables:
 
     def test_missing_benchmark_metadata_raises(self, tmp_path):
         with pytest.raises(ValueError, match=BENCHMARK_METADATA_FILENAME):
-            prepare_benchmark_data(self._zip_without(tmp_path, BENCHMARK_METADATA_FILENAME))
+            _prepare(self._zip_without(tmp_path, BENCHMARK_METADATA_FILENAME))
 
     def test_missing_model_metadata_raises(self, tmp_path):
         with pytest.raises(ValueError, match=MODEL_METADATA_FILENAME):
-            prepare_benchmark_data(self._zip_without(tmp_path, MODEL_METADATA_FILENAME))
+            _prepare(self._zip_without(tmp_path, MODEL_METADATA_FILENAME))
 
     def test_overrides_stand_in_for_zip_tables(self, tmp_path):
         path = self._zip_without(tmp_path, BENCHMARK_METADATA_FILENAME, MODEL_METADATA_FILENAME)
         with pytest.warns(UserWarning, match="Ghost"):
-            out = prepare_benchmark_data(
+            out = _prepare(
                 path, min_benchmarks_per_model=2,
                 benchmark_metadata=METADATA, model_metadata=MODEL_METADATA,
             )
@@ -299,7 +318,8 @@ class TestMissingTables:
 
 @pytest.fixture(scope="module")
 def live_output():
-    return prepare_benchmark_data()
+    # The published fit input predates the mid-range rule.
+    return prepare_benchmark_data(min_mid_range_benchmarks_per_model=0)
 
 
 @pytest.fixture(scope="module")
