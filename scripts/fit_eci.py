@@ -70,12 +70,15 @@ def main():
 
     bayesian = parser.add_argument_group("bayesian options")
     bayesian.add_argument(
-        "--draws", type=int, default=4000,
-        help="Posterior draws kept per chain (default: 4000)",
+        "--draws", type=int, default=None,
+        help="Posterior draws kept per chain, fixed for every run (default: "
+             "start small and add draws until the fit passes the convergence "
+             "checks)",
     )
     bayesian.add_argument(
-        "--tune", type=int, default=2000,
-        help="Tuning steps per chain, discarded (default: 2000)",
+        "--tune", type=int, default=None,
+        help="Tuning steps per chain, discarded (default: 500 with the dense "
+             "mass matrix, 1000 without)",
     )
     bayesian.add_argument(
         "--chains", type=int, default=4, help="Number of chains (default: 4)",
@@ -123,7 +126,7 @@ def main():
 
     if args.method == "bayesian":
         print(f"\nFitting Bayesian IRT model ({args.chains} chains, "
-              f"{args.draws} draws, {args.tune} tuning steps)...")
+              f"{args.draws or 'adaptive'} draws, {args.tune or 'default'} tuning steps)...")
         eci_df, edi_df, draws = fit_bayesian_eci(
             df,
             draws=args.draws,
