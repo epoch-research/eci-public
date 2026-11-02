@@ -321,7 +321,7 @@ class TestDenseSampling:
         monkeypatch.setattr(bayesian, "_MIN_ESS", 10**9)
         with pytest.warns(UserWarning, match="falling back to a cold fit"):
             _, _, draws = fit_bayesian_eci(truth["df"], **SAMPLING)
-        assert [a["stage"] for a in draws["attempts"]] == ["pilot", "refresh", "cold"]
+        assert [a["stage"] for a in draws["attempts"]] == ["pilot", "cold"]
 
     def test_cold_fit_is_still_available(self, truth):
         _, _, draws = fit_bayesian_eci(truth["df"], dense_mass_matrix=False, **SAMPLING)

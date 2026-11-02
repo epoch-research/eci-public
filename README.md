@@ -202,10 +202,9 @@ estimate the covariance and to start each chain from a different pilot draw,
 so r_hat stays meaningful. The dense run then tunes for 500 steps.
 
 If the dense run diverges or still misses the convergence checks (bulk ESS
-below 400 or r_hat above 1.01) at 16,000 draws, it is redone with the
-covariance of its own draws, and if that fails too the fit falls back to the
-default diagonal sampler, with a warning. `draws["started_from"]` says which
-of "pilot", "refresh" or "cold" the draws came from.
+below 400 or r_hat above 1.01) at 16,000 draws, the fit falls back to the
+default diagonal sampler, with a warning. `draws["started_from"]` says
+whether the draws came from the "pilot" or the "cold" stage.
 `dense_mass_matrix=False` goes straight to PyMC's default sampler (1000
 tuning steps, from 4000 up to 32,000 draws per chain), which needs about
 12,000 draws on the full data where the dense one needs 1000.

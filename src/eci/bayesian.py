@@ -18,9 +18,8 @@ Capabilities, difficulties and slopes are strongly correlated (a model can sit
 further below a benchmark if that benchmark's slope is shallower), and the
 default diagonal mass matrix cannot see that, which forces many small steps per
 draw. The covariance comes from a short diagonal pilot run. If that fit
-diverges or still misses the convergence checks at 16,000 draws, the fit tries
-again with the covariance of that fit's own draws, and only then falls back to
-the default diagonal mass matrix. Each stage starts small and adds draws until
+diverges or still misses the convergence checks at 16,000 draws, the fit falls
+back to the default diagonal mass matrix. Each stage starts small and adds draws until
 the checks pass. Everything else here is a private helper behind the public
 entry points.
 """
@@ -410,10 +409,8 @@ def _sample(
 ) -> tuple[az.InferenceData, str, list[dict]]:
     """Sample the model, trying each stage until one passes the checks.
 
-    The dense stages, each with its own mass matrix: "pilot" (a short diagonal
-    run's draws), then "refresh" (the draws of the pilot stage's last, failed
-    run). Then "cold", with
-    the diagonal mass matrix. Returns the trace, the stage it came from, and
+    First "pilot", with a dense mass matrix from a short diagonal run's
+    draws, then "cold", with the diagonal mass matrix. Returns the trace, the stage it came from, and
     one dict per run (stage, tune, draws, divergences, max_rhat, min_ess).
     """
     common = dict(chains=chains, cores=chains, progressbar=progressbar,
@@ -447,16 +444,9 @@ def _sample(
         trace, passed = dense_stage(pilot, "pilot", random_seed + 200)
         if passed:
             return trace, "pilot", attempts
-        # Refresh: the failed run's own draws, divergent or not, come from the
-        # real posterior under a better mass matrix than the one before, so
-        # their covariance is a better estimate (e.g. of a benchmark every
-        # model scores near the floor on, whose difficulty has a long tail).
-        trace, passed = dense_stage(trace, "refresh", random_seed + 100)
-        if passed:
-            return trace, "refresh", attempts
         last = attempts[-1]
         warnings.warn(
-            f"The dense fits did not converge (last: {last['divergences']} divergences, "
+            f"The dense fit did not converge (last: {last['divergences']} divergences, "
             f"max r_hat {last['max_rhat']:.3f}, min bulk ESS {last['min_ess']:.0f} at "
             f"{last['draws']} draws); falling back to a cold fit.",
             stacklevel=3,
@@ -522,9 +512,7 @@ def fit_bayesian_eci(
             covariance of a short diagonal pilot run (tune 1000 + draws
             1000), whose draws also give each chain's starting point. If that
             "pilot" stage diverges or still misses the checks at its most
-            draws, a "refresh" stage tries again with the covariance of the
-            failed stage's own draws. Only if both fail does the fit go cold
-            (PyMC's default initialisation and diagonal adaptation), with a
+            draws, the fit goes cold (PyMC's default initialisation and diagonal adaptation), with a
             warning. False goes straight to the
             cold stage, which needs about 12,000 draws on the full data where
             a dense stage needs 1,000.
@@ -559,7 +547,7 @@ def fit_bayesian_eci(
           sigma,
           the per-draw map coefficients a and b, trace, the full
           ``arviz.InferenceData``, started_from (the stage the draws came
-          from: "pilot", "refresh" or "cold"), attempts
+          from: "pilot" or "cold"), attempts
           (one dict per run: stage, tune, draws, divergences, max_rhat,
           min_ess), and - with evaluate=True - evaluation, the dict of
           diagnostic tables.
