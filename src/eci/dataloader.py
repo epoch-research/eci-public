@@ -95,12 +95,27 @@ def load_benchmark_metadata(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
         raise ValueError(f"{BENCHMARK_METADATA_FILENAME} is missing columns: {sorted(missing)}")
     if "superseded_by" not in metadata.columns:
         metadata["superseded_by"] = pd.NA
-    # Rows with in_eci false describe benchmarks the site displays but the
-    # fit does not use (they still carry baselines and ceilings).
+    return _with_in_eci(metadata)
+
+
+def _with_in_eci(metadata: pd.DataFrame) -> pd.DataFrame:
+    """Return ``metadata`` with a boolean in_eci column.
+
+    Rows with in_eci false describe benchmarks the site displays but the fit
+    does not use (they still carry baselines and ceilings). A table without
+    the column predates the flag and fits every benchmark; a blank in a table
+    that has it is an error, since either default would silently change which
+    benchmarks the fit uses.
+    """
     if "in_eci" not in metadata.columns:
-        metadata["in_eci"] = True
-    metadata["in_eci"] = metadata["in_eci"].fillna(True).astype(bool)
-    return metadata
+        return metadata.assign(in_eci=True)
+    blank = metadata["in_eci"].isna()
+    if blank.any():
+        raise ValueError(
+            f"in_eci is blank for benchmarks: {sorted(metadata.loc[blank, 'benchmark'])}. "
+            f"Set it to True or False."
+        )
+    return metadata.assign(in_eci=metadata["in_eci"].astype(bool))
 
 
 def load_model_metadata(dfs: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -140,8 +155,9 @@ def get_all_benchmark_names(
     return set(benchmark_metadata.loc[benchmark_metadata["in_eci"], "benchmark"])
 
 
-def _load_scores(dfs: dict[str, pd.DataFrame], metadata: pd.DataFrame) -> pd.DataFrame:
-    """Load and normalize per-benchmark scores as directed by the metadata."""
+def _load_raw_scores(dfs: dict[str, pd.DataFrame], metadata: pd.DataFrame) -> pd.DataFrame:
+    """Load per-benchmark scores as directed by the metadata, as reported
+    (normalized later by _normalize_scores)."""
     frames = []
     unavailable = []
     for cfg in metadata.itertuples():
@@ -161,11 +177,6 @@ def _load_scores(dfs: dict[str, pd.DataFrame], metadata: pd.DataFrame) -> pd.Dat
         if "source" not in df.columns:
             df["source"] = pd.NA
         df = df.dropna(subset=["model_version", "performance"])
-
-        raw = pd.to_numeric(df["performance"], errors="coerce") * cfg.scale
-        # Normalize so the random-guessing baseline maps to 0 and the
-        # max-achievable score (the ceiling, defaulting to 1.0) maps to 1.
-        df["performance"] = (raw - cfg.random_baseline) / (cfg.score_ceiling - cfg.random_baseline)
         df["benchmark"] = cfg.benchmark
         frames.append(df[["model_version", "benchmark", "performance", "source"]])
 
@@ -179,6 +190,24 @@ def _load_scores(dfs: dict[str, pd.DataFrame], metadata: pd.DataFrame) -> pd.Dat
     return pd.concat(frames, ignore_index=True)
 
 
+def _normalize_scores(scores: pd.DataFrame, metadata: pd.DataFrame) -> pd.DataFrame:
+    """Normalize raw scores so each benchmark's random-guessing baseline maps
+    to 0 and its max-achievable score (the ceiling) maps to 1, then clip into
+    [0, 1]: sub-baseline scores clip up to 0, above-ceiling ones down to 1.
+    Rows whose score is not a number, or whose benchmark's baseline equals its
+    ceiling, are dropped.
+    """
+    cfg = metadata.set_index("benchmark")
+    benchmark = scores["benchmark"]
+    raw = pd.to_numeric(scores["performance"], errors="coerce") * benchmark.map(cfg["scale"])
+    baseline = benchmark.map(cfg["random_baseline"])
+    ceiling = benchmark.map(cfg["score_ceiling"])
+    performance = ((raw - baseline) / (ceiling - baseline)).replace([np.inf, -np.inf], np.nan)
+    scores = scores.assign(performance=performance)
+    scores = scores[scores["performance"].notna()]
+    return scores.assign(performance=scores["performance"].clip(lower=0.0, upper=1.0))
+
+
 def filter_mid_range_models(
     scores: pd.DataFrame,
     min_benchmarks: int,
@@ -186,18 +215,18 @@ def filter_mid_range_models(
     model_col: str = "model",
 ) -> pd.DataFrame:
     """Keep the models with at least ``min_benchmarks`` distinct benchmarks
-    whose observed score lies in ``score_range`` (inclusive).
+    whose score lies in ``score_range`` (inclusive).
 
-    A benchmark's observed score is the model's best normalized score on it,
-    the value the fit sees. A qualifying model keeps all of its scores,
-    extreme ones included; this only drops models whose scores sit almost
-    entirely at the floor or the ceiling.
+    Expects one row per (model, benchmark): the normalized score the fit
+    sees. A qualifying model keeps all of its scores, extreme ones included;
+    this only drops models whose scores sit almost entirely at the floor or
+    the ceiling.
     """
     if min_benchmarks <= 0:
         return scores
-    best = scores.groupby([model_col, "benchmark"])["performance"].max()
     low, high = score_range
-    mid = best[(best >= low) & (best <= high)].groupby(level=model_col).size()
+    in_range = scores["performance"].between(low, high)
+    mid = scores[in_range].groupby(model_col)["benchmark"].nunique()
     return scores[scores[model_col].isin(mid[mid >= min_benchmarks].index)]
 
 
@@ -217,23 +246,25 @@ def prepare_benchmark_data(
     """
     Load and process benchmark data for ECI fitting.
 
-    1. Load per-benchmark scores as directed by benchmark_metadata.csv
+    1. Load per-benchmark scores as directed by benchmark_metadata.csv,
+       plus any extra_scores
     2. Normalize with each benchmark's random baseline and score ceiling,
        clipping out-of-range scores into [0, 1]
     3. Map model versions to model groups via model_metadata.csv
     4. Drop rows dated before min_date
     5. Apply benchmark supersession (e.g. FrontierMath v2 replaces v1
        tier-for-tier where a group has both)
-    6. Filter models with too few benchmarks (and optionally with too few
+    6. Keep one row per (model group, benchmark): the version with the best
+       score, warning about groups whose versions have different dates
+    7. Filter models with too few benchmarks (and optionally with too few
        benchmarks scored inside mid_range)
-    7. Aggregate by (model group, benchmark) taking max performance
 
     Args:
         source: URL or path of benchmark_data.zip
         cache_dir: Optional directory to cache downloaded files
         min_benchmarks_per_model: Minimum distinct benchmarks required per model
         min_mid_range_benchmarks_per_model: Minimum distinct benchmarks whose
-            observed (normalized, clipped, best-version) score lies in
+            (normalized, clipped, best-version) score lies in
             mid_range; qualifying models keep all their scores. 0 disables it.
         mid_range: Inclusive (low, high) score range for the rule above.
         min_date: Rows dated before this are dropped
@@ -265,10 +296,8 @@ def prepare_benchmark_data(
     if benchmark_metadata is None:
         metadata = load_benchmark_metadata(dfs)
     else:
-        metadata = benchmark_metadata.copy()
-        if "in_eci" not in metadata.columns:
-            metadata["in_eci"] = True
-    metadata = metadata[metadata["in_eci"].fillna(True).astype(bool)]
+        metadata = _with_in_eci(benchmark_metadata)
+    metadata = metadata[metadata["in_eci"]]
     if model_metadata is None:
         model_metadata = load_model_metadata(dfs)
     else:
@@ -293,7 +322,7 @@ def prepare_benchmark_data(
     elif exclude_benchmarks is not None:
         metadata = metadata[~metadata["benchmark"].isin(exclude_benchmarks)]
 
-    scores = _load_scores(dfs, metadata)
+    scores = _load_raw_scores(dfs, metadata)
 
     if extra_scores is not None and len(extra_scores):
         extra = extra_scores.copy()
@@ -307,14 +336,7 @@ def prepare_benchmark_data(
         extra = extra[known]
         if "source" not in extra.columns:
             extra["source"] = pd.NA
-        # Extra rows carry raw scores; normalize them exactly like rows read
-        # from the benchmark's source file.
-        cfg = metadata.set_index("benchmark")
-        raw = (pd.to_numeric(extra["performance"], errors="coerce")
-               * extra["benchmark"].map(cfg["scale"]))
-        baseline = extra["benchmark"].map(cfg["random_baseline"])
-        ceiling = extra["benchmark"].map(cfg["score_ceiling"])
-        extra["performance"] = (raw - baseline) / (ceiling - baseline)
+        # Extra rows carry raw scores, normalized below with the rest.
         scores = pd.concat(
             [scores, extra[["model_version", "benchmark", "performance", "source"]]],
             ignore_index=True,
@@ -335,13 +357,7 @@ def prepare_benchmark_data(
                 "date": today,
             })], ignore_index=True)
 
-    # Sub-baseline scores clip up to 0, above-ceiling scores clip down to 1;
-    # NaN performances (failed numeric coercion or degenerate config rows)
-    # are removed.
-    scores["performance"] = scores["performance"].replace([np.inf, -np.inf], np.nan)
-    scores = scores[scores["performance"].notna()]
-    scores["performance"] = scores["performance"].clip(lower=0.0, upper=1.0)
-
+    scores = _normalize_scores(scores, metadata)
     scores = scores.merge(model_table, on="model_version", how="inner")
 
     # Rows dated before min_date (or with no date) never enter the fit; all
@@ -358,8 +374,14 @@ def prepare_benchmark_data(
         drop = (scores["benchmark"] == old_name) & scores["model_group"].isin(groups_with_new)
         scores = scores[~drop]
 
-    # Sort so "first" aggregations prefer the most recent version metadata
+    # One row per (model group, benchmark): the version with the best score,
+    # the most recent of any tied, so its model_version and source describe
+    # the score kept. The row's date is the latest of the pair's versions.
+    group_dates = scores.groupby("model_group")["date"].nunique()
     scores = scores.sort_values(["model_group", "date"], ascending=[True, False])
+    pairs = scores.groupby(["model_group", "benchmark"], sort=False)
+    latest = pairs["date"].max()
+    scores = scores.loc[pairs["performance"].idxmax()].assign(date=latest.to_numpy())
 
     counts = scores.groupby("model_group")["benchmark"].nunique()
     valid_models = counts[counts >= min_benchmarks_per_model].index
@@ -368,6 +390,14 @@ def prepare_benchmark_data(
         scores, min_mid_range_benchmarks_per_model, mid_range, model_col="model_group"
     )
 
+    mixed = sorted(set(group_dates[group_dates > 1].index) & set(scores["model_group"]))
+    if mixed:
+        warnings.warn(
+            f"{len(mixed)} model groups combine versions with different release "
+            f"dates; each row is dated by the latest version scored on that "
+            f"benchmark: {mixed}"
+        )
+
     release_dates = metadata.set_index("benchmark")["release_date"]
     scores["benchmark_release_date"] = pd.to_datetime(scores["benchmark"].map(release_dates))
 
@@ -375,19 +405,10 @@ def prepare_benchmark_data(
     model_ids = {m: f"m{i+1}" for i, m in enumerate(scores["model_group"].unique())}
     scores["benchmark_id"] = scores["benchmark"].map(benchmark_ids)
     scores["model_id"] = scores["model_group"].map(model_ids)
+    scores["model"] = scores["model_group"]
+    scores["Model"] = scores["model_group"]
 
-    aggregated = scores.groupby(["model_id", "benchmark_id"]).agg(
-        performance=("performance", "max"),
-        benchmark=("benchmark", "first"),
-        benchmark_release_date=("benchmark_release_date", "first"),
-        model=("model_group", "first"),
-        model_version=("model_version", "first"),
-        Model=("model_group", "first"),
-        date=("date", "max"),
-        source=("source", "first"),
-    ).reset_index()
-
-    return aggregated[[
+    return scores.sort_values(["model_id", "benchmark_id"]).reset_index(drop=True)[[
         "model_id", "benchmark_id", "performance", "benchmark",
         "benchmark_release_date",
         "model", "model_version", "Model", "date", "source"

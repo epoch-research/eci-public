@@ -178,6 +178,25 @@ class TestLoading:
         assert alpha["model_version"] == "v1b"
         assert alpha["date"] == pd.Timestamp("2024-06-01")
 
+    def test_aggregation_reports_the_best_scoring_version(self, synthetic_zip):
+        # v1b is newer than v1 but scores lower on Gamma: the row keeps v1's
+        # score, version and source, dated by the pair's latest version.
+        extra = pd.DataFrame({
+            "model_version": ["v1b"], "benchmark": ["Gamma"],
+            "performance": [0.3], "source": ["worse run"],
+        })
+        out = _prepare(synthetic_zip, min_benchmarks_per_model=1, extra_scores=extra)
+        gamma = _row(out, "Group One", "Gamma")
+        assert gamma["performance"] == pytest.approx(0.5)
+        assert gamma["model_version"] == "v1"
+        assert pd.isna(gamma["source"])
+        assert gamma["date"] == pd.Timestamp("2024-06-01")
+
+    def test_groups_with_mixed_release_dates_warn(self, synthetic_zip):
+        # Group One's v1 and v1b have different dates
+        with pytest.warns(UserWarning, match=r"different release dates.*'Group One'"):
+            _prepare(synthetic_zip, min_benchmarks_per_model=1)
+
     def test_release_dates_from_config(self, loaded):
         beta = _row(loaded, "Group One", "Beta")
         assert beta["benchmark_release_date"] == pd.Timestamp("2021-06-15")
@@ -214,6 +233,17 @@ class TestExtraScores:
         assert row["performance"] == pytest.approx((0.85 - 0.25) / 0.75)
         assert _row(out, "stage-v", "Beta")["performance"] == pytest.approx(0.5)
 
+    def test_extra_scores_are_clipped(self, synthetic_zip):
+        # Below Alpha's 0.25 baseline and above Beta's ceiling
+        extra = pd.DataFrame({
+            "model_version": ["stage-v", "stage-v"],
+            "benchmark": ["Alpha", "Beta"],
+            "performance": [0.1, 120.0],
+        })
+        out = _prepare(synthetic_zip, min_benchmarks_per_model=2, extra_scores=extra)
+        assert _row(out, "stage-v", "Alpha")["performance"] == 0.0
+        assert _row(out, "stage-v", "Beta")["performance"] == 1.0
+
     def test_extra_scores_undated_known_version_is_dated_today(self, synthetic_zip):
         # A staging model can already exist in the model metadata with its
         # dates unset; its rows (including ones read from the zip) must be
@@ -246,6 +276,19 @@ class TestExtraScores:
 class TestDisplayOnlyRows:
     def test_display_only_benchmarks_are_not_loaded(self, loaded):
         assert "DisplayOnly" not in set(loaded["benchmark"])
+
+    def test_blank_in_eci_raises(self, synthetic_zip):
+        metadata = METADATA.astype({"in_eci": object})
+        metadata.loc[metadata["benchmark"] == "Beta", "in_eci"] = None
+        with pytest.raises(ValueError, match=r"in_eci is blank .*'Beta'"):
+            _prepare(synthetic_zip, benchmark_metadata=metadata)
+
+    def test_missing_in_eci_column_fits_every_benchmark(self, synthetic_zip):
+        metadata = METADATA.drop(columns="in_eci")
+        with pytest.warns(UserWarning, match="Ghost"):
+            out = _prepare(synthetic_zip, min_benchmarks_per_model=1,
+                           benchmark_metadata=metadata)
+        assert "DisplayOnly" in set(out["benchmark"])
 
 
 class TestBenchmarkFiltering:
