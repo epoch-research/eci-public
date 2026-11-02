@@ -1,5 +1,5 @@
 """
-Fitting for the Epoch Capabilities Index (ECI).
+The frequentist (least-squares) fit for the Epoch Capabilities Index (ECI).
 
 Deprecated/historical: this least-squares fit predates the Bayesian one in
 ``eci.bayesian``, which is now the default and the one to use. It is kept

@@ -14,7 +14,7 @@ from scipy.sparse import lil_matrix
 from scipy.stats import spearmanr
 
 from eci import fit_eci_model, prepare_benchmark_data
-from eci.fitting import _affine_map, _irt_jacobian
+from eci.frequentist import _affine_map, _irt_jacobian
 
 
 # URLs for test data

@@ -36,7 +36,7 @@ from pymc.distributions.transforms import ZeroSumTransform
 from pymc.step_methods.hmc.quadpotential import QuadPotentialFull
 
 from .evaluation import evaluate_fit
-from .fitting import (
+from .frequentist import (
     DEFAULT_ANCHOR_ECI_HIGH,
     DEFAULT_ANCHOR_ECI_LOW,
     DEFAULT_ANCHOR_MODEL_HIGH,
