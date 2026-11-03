@@ -20,6 +20,7 @@ builds the zip and then consumes it):
 """
 
 import io
+import logging
 import warnings
 import zipfile
 from pathlib import Path
@@ -32,6 +33,8 @@ import pandas as pd
 BENCHMARK_DATA_URL = "https://epoch.ai/data/benchmark_data.zip"
 BENCHMARK_METADATA_FILENAME = "benchmark_metadata.csv"
 MODEL_METADATA_FILENAME = "model_metadata.csv"
+
+logger = logging.getLogger(__name__)
 
 
 def download_benchmark_data(source: str | Path = BENCHMARK_DATA_URL, cache_dir: Optional[Path] = None) -> dict[str, pd.DataFrame]:
@@ -392,7 +395,7 @@ def prepare_benchmark_data(
 
     mixed = sorted(set(group_dates[group_dates > 1].index) & set(scores["model_group"]))
     if mixed:
-        warnings.warn(
+        logger.info(
             f"{len(mixed)} model groups combine versions with different release "
             f"dates; each row is dated by the latest version scored on that "
             f"benchmark: {mixed}"

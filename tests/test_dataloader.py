@@ -6,6 +6,8 @@ loading rule. Live tests download the published zip and require its output
 to match the published fit input (processed_data_for_eci.csv) exactly.
 """
 
+import logging
+import re
 import zipfile
 
 import pandas as pd
@@ -192,10 +194,12 @@ class TestLoading:
         assert pd.isna(gamma["source"])
         assert gamma["date"] == pd.Timestamp("2024-06-01")
 
-    def test_groups_with_mixed_release_dates_warn(self, synthetic_zip):
-        # Group One's v1 and v1b have different dates
-        with pytest.warns(UserWarning, match=r"different release dates.*'Group One'"):
+    def test_groups_with_mixed_release_dates_are_logged(self, synthetic_zip, caplog):
+        # Group One's v1 and v1b have different dates; this is logged, not
+        # warned, so it never stops a run that treats warnings as errors
+        with caplog.at_level(logging.INFO, logger="eci.dataloader"):
             _prepare(synthetic_zip, min_benchmarks_per_model=1)
+        assert re.search(r"different release dates.*'Group One'", caplog.text)
 
     def test_release_dates_from_config(self, loaded):
         beta = _row(loaded, "Group One", "Beta")
