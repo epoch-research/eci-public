@@ -30,19 +30,16 @@ from scipy.optimize import least_squares
 from scipy.sparse import coo_matrix
 from tqdm import tqdm
 
+from .bayesian import (
+    DEFAULT_ANCHOR_ECI_HIGH,
+    DEFAULT_ANCHOR_ECI_LOW,
+    DEFAULT_ANCHOR_MODEL_HIGH,
+    DEFAULT_ANCHOR_MODEL_LOW,
+    _MIN_ANCHOR_SPREAD,
+)
+
 DEFAULT_ANCHOR_BENCHMARK = "Winogrande"
 DEFAULT_ANCHOR_DISCRIMINABILITY = 1.0
-
-# The anchor model names are matched against the "Model" column of the fit
-# input, i.e. the Airtable "Model aggregation" names. Renaming an aggregation
-# in Airtable requires a coordinated change here (the fit raises if an anchor
-# is missing).
-DEFAULT_ANCHOR_MODEL_LOW = "Claude 3.5 Sonnet"
-DEFAULT_ANCHOR_ECI_LOW = 130.0
-DEFAULT_ANCHOR_MODEL_HIGH = "GPT-5"
-DEFAULT_ANCHOR_ECI_HIGH = 150.0
-
-_MIN_ANCHOR_SPREAD = 1e-12
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:

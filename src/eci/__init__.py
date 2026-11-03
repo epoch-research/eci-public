@@ -13,7 +13,15 @@ is deprecated/historical - kept for reference and reproducing old results,
 not for new work.
 """
 
-from .bayesian import BayesianPriors, build_bayesian_model, fit_bayesian_eci
+from .bayesian import (
+    DEFAULT_ANCHOR_ECI_HIGH,
+    DEFAULT_ANCHOR_ECI_LOW,
+    DEFAULT_ANCHOR_MODEL_HIGH,
+    DEFAULT_ANCHOR_MODEL_LOW,
+    BayesianPriors,
+    build_bayesian_model,
+    fit_bayesian_eci,
+)
 from .dataloader import (
     download_benchmark_data,
     load_benchmark_metadata,
@@ -24,6 +32,10 @@ from .evaluation import evaluate_fit, save_evaluation, summarise_evaluation
 from .frequentist import fit_eci_model
 
 __all__ = [
+    "DEFAULT_ANCHOR_ECI_HIGH",
+    "DEFAULT_ANCHOR_ECI_LOW",
+    "DEFAULT_ANCHOR_MODEL_HIGH",
+    "DEFAULT_ANCHOR_MODEL_LOW",
     "BayesianPriors",
     "build_bayesian_model",
     "download_benchmark_data",

@@ -36,13 +36,17 @@ from pymc.distributions.transforms import ZeroSumTransform
 from pymc.step_methods.hmc.quadpotential import QuadPotentialFull
 
 from .evaluation import evaluate_fit
-from .frequentist import (
-    DEFAULT_ANCHOR_ECI_HIGH,
-    DEFAULT_ANCHOR_ECI_LOW,
-    DEFAULT_ANCHOR_MODEL_HIGH,
-    DEFAULT_ANCHOR_MODEL_LOW,
-    _MIN_ANCHOR_SPREAD,
-)
+
+# The anchor model names are matched against the "Model" column of the fit
+# input, i.e. the Airtable "Model aggregation" names. Renaming an aggregation
+# in Airtable requires a coordinated change here (the fit raises if an anchor
+# is missing).
+DEFAULT_ANCHOR_MODEL_LOW = "Claude 3.5 Sonnet"
+DEFAULT_ANCHOR_ECI_LOW = 130.0
+DEFAULT_ANCHOR_MODEL_HIGH = "GPT-5"
+DEFAULT_ANCHOR_ECI_HIGH = 150.0
+
+_MIN_ANCHOR_SPREAD = 1e-12
 
 # Keeps the Beta parameters away from 0 when the curve saturates; well inside
 # the clipping applied to the observed scores.
