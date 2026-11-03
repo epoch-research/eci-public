@@ -1,5 +1,10 @@
 """
-Fitting for the Epoch Capabilities Index (ECI).
+The frequentist fit for the Epoch Capabilities Index (ECI).
+
+Deprecated/historical: this least-squares fit predates the Bayesian one in
+``eci.bayesian``, which is now the default and the one to use. It is kept
+for reference and for reproducing old results, not for new work - it has no
+per-observation noise model, no `sigma`, and no diagnostic suite.
 
 The model assumes benchmark performance follows a logistic curve:
 
@@ -25,19 +30,16 @@ from scipy.optimize import least_squares
 from scipy.sparse import coo_matrix
 from tqdm import tqdm
 
+from .bayesian import (
+    DEFAULT_ANCHOR_ECI_HIGH,
+    DEFAULT_ANCHOR_ECI_LOW,
+    DEFAULT_ANCHOR_MODEL_HIGH,
+    DEFAULT_ANCHOR_MODEL_LOW,
+    _MIN_ANCHOR_SPREAD,
+)
+
 DEFAULT_ANCHOR_BENCHMARK = "Winogrande"
 DEFAULT_ANCHOR_DISCRIMINABILITY = 1.0
-
-# The anchor model names are matched against the "Model" column of the fit
-# input, i.e. the Airtable "Model aggregation" names. Renaming an aggregation
-# in Airtable requires a coordinated change here (the fit raises if an anchor
-# is missing).
-DEFAULT_ANCHOR_MODEL_LOW = "Claude 3.5 Sonnet"
-DEFAULT_ANCHOR_ECI_LOW = 130.0
-DEFAULT_ANCHOR_MODEL_HIGH = "GPT-5"
-DEFAULT_ANCHOR_ECI_HIGH = 150.0
-
-_MIN_ANCHOR_SPREAD = 1e-12
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
@@ -132,6 +134,10 @@ def fit_eci_model(
 ) -> tuple[pd.DataFrame, pd.DataFrame, "dict | None"]:
     """
     Fit the IRT model and return ECI-scale scores with bootstrap CIs.
+
+    Deprecated/historical: prefer :func:`eci.bayesian.fit_bayesian_eci`,
+    which is now the default fit. This one is kept for reference and for
+    reproducing old results.
 
     Args:
         df: DataFrame with columns model_id, benchmark_id, performance,

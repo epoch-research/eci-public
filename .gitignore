@@ -1,6 +1,11 @@
 # Outputs
-outputs/
+outputs/*
 .cache/
+
+# Local data: benchmark snapshots, Stan builds, caches. Globbed rather than
+# ignoring the directory outright, so a specific file can be un-ignored with
+# a negation (e.g. !data/benchmark_metadata.csv) if it should be tracked.
+data/*
 
 # Claude
 .claude/

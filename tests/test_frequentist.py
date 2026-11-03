@@ -10,10 +10,11 @@ and verify that the fitted scores match:
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.sparse import lil_matrix
 from scipy.stats import spearmanr
 
 from eci import fit_eci_model, prepare_benchmark_data
-from eci.fitting import _affine_map, _irt_jacobian
+from eci.frequentist import _affine_map, _irt_jacobian
 
 
 # URLs for test data
@@ -27,8 +28,9 @@ EDI_TOLERANCE = 0.1  # EDI points
 
 @pytest.fixture(scope="module")
 def benchmark_data():
-    """Prepare benchmark performance data from the published zip."""
-    return prepare_benchmark_data()
+    """Prepare benchmark performance data from the published zip, without the
+    mid-range rule, which the published scores predate."""
+    return prepare_benchmark_data(min_mid_range_benchmarks_per_model=0)
 
 
 @pytest.fixture(scope="module")
@@ -339,7 +341,6 @@ def _irt_jacobian_loop_reference(
     anchor_idx, n_models, n_benchmarks, regularization_strength,
 ):
     """Loop-based Jacobian assembly used as the verification reference."""
-    from scipy.sparse import lil_matrix
 
     def sigmoid(x):
         return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
